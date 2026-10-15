@@ -40,3 +40,32 @@ describe('format helpers', () => {
     expect(shortHash('abcdef0123456789', 6)).toBe('abcdef…')
   })
 })
+
+describe('project scoping', () => {
+  it('sends every data call to the active project', async () => {
+    const { api, http, setActiveProject } = await import('./api')
+    const seen: string[] = []
+    const original = http.defaults.adapter
+    http.defaults.adapter = async (config) => {
+      seen.push(`${config.method} ${config.url}`)
+      return { status: 200, statusText: '', headers: {}, config, data: { papers: [], investigations: [], total: 0 } }
+    }
+    try {
+      setActiveProject('prj_0123456789')
+      await api.listPapers()
+      await api.graphStats()
+      await api.listInvestigations()
+      await api.startInvestigation('A long enough question?')
+      expect(api.paperFileUrl('p_aaaaaaaaaaaa')).toContain('/api/projects/prj_0123456789/papers/p_aaaaaaaaaaaa/file')
+      expect(seen).toEqual([
+        'get /api/projects/prj_0123456789/papers',
+        'get /api/projects/prj_0123456789/graph/stats',
+        'get /api/projects/prj_0123456789/investigations',
+        'post /api/projects/prj_0123456789/investigations',
+      ])
+    } finally {
+      http.defaults.adapter = original
+      setActiveProject('default')
+    }
+  })
+})

@@ -77,3 +77,15 @@ def test_graph_query_is_read_only(ingested, store):
     assert "error" in tools.graph_query("CREATE (:Paper {id: 'x'})")
     rows = tools.graph_query("MATCH (p:Paper) RETURN p.title AS title")["rows"]
     assert len(rows) == 3
+
+
+def test_pages_are_stored_and_linked(ingested, store):
+    """Every page of every paper is a Page node with its text, and every chunk points to its page."""
+    rows = store.query("""MATCH (p:Paper)-[:HAS_PAGE]->(pg:Page)
+                          RETURN p.id AS id, p.num_pages AS num_pages, count(pg) AS pages, min(pg.number) AS first""")
+    assert len(rows) == 3
+    assert all(r["pages"] == r["num_pages"] and r["first"] == 1 for r in rows)
+    unlinked = store.query("MATCH (c:Chunk) WHERE NOT (c)-[:ON_PAGE]->(:Page) RETURN count(c) AS n")
+    assert unlinked[0]["n"] == 0
+    mismatched = store.query("MATCH (c:Chunk)-[:ON_PAGE]->(pg:Page) WHERE c.page <> pg.number OR c.paper_id <> pg.paper_id RETURN count(c) AS n")
+    assert mismatched[0]["n"] == 0

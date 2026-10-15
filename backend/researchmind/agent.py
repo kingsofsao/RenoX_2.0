@@ -1,8 +1,11 @@
 """The investigation agent.
 
-Claude mode: Claude plans and calls the graph tools (search, traversal, claim comparison,
-gap finding) in a tool-use loop, then writes a cited report. It can only cite chunk ids
-returned by tools; citations are verified against the graph afterwards.
+LLM mode, by provider:
+- ollama (and any provider exposing chat()): retrieval-first grounded investigation
+  (researchmind/grounded.py) - evidence is gathered through the MCP tools, the model writes a
+  report citing numbered sources and may request a limited number of extra searches.
+- anthropic: Claude plans and calls the graph tools in a tool-use loop, then writes a cited report.
+Citations are verified against the graph afterwards in both cases.
 
 Offline mode (no API key): a fixed investigation plan over the same tools, producing an
 extractive, fully cited report. Useful for demos without credentials and for tests.
@@ -14,14 +17,17 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Callable
 
 import anthropic
 
 from .graph import GraphStore
-from .llm import get_llm
+from .grounded import GroundedInvestigation, NoRelevantEvidence
+from .llm import LLMUnavailable, get_llm
+from .mcp_bridge import MCPToolClient, MCPToolError
 from .report import InvestigationResult, collect_evidence, finalize_citations
-from .tools import TOOL_SPECS, ResearchTools, call_tool
+from .tools import MIN_RELEVANCE, TOOL_SPECS, ResearchTools, call_tool
 
 log = logging.getLogger(__name__)
 
@@ -45,27 +51,51 @@ How to write the final report (Markdown):
 
 
 class Investigator:
-    def __init__(self, store: GraphStore, llm=None, use_llm: bool = True, max_turns: int = 14):
-        self.tools = ResearchTools(store)
+    """Runs one investigation over the graph.
+
+    transport: "mcp" (default) sends every tool call through the ResearchMind MCP server in-process;
+    "direct" calls the same ResearchTools methods without the protocol layer (AGENT_TOOL_TRANSPORT).
+    time_budget_s: once exceeded, the agent stops calling tools and writes its report.
+    """
+
+    def __init__(self, store: GraphStore, llm=None, use_llm: bool = True, max_turns: int | None = None,
+                 tools: ResearchTools | None = None, transport: str | None = None, time_budget_s: float | None = None):
+        self.tools = tools or ResearchTools(store)
         self.store = store
         self.llm = (llm or get_llm()) if use_llm else None
-        self.max_turns = max_turns
+        self.max_turns = max_turns if max_turns is not None else int(os.getenv("AGENT_MAX_TURNS", "14"))
         self.effort = os.getenv("AGENT_EFFORT", "high")
+        self.transport = (transport or os.getenv("AGENT_TOOL_TRANSPORT", "mcp")).lower()
+        self.mcp = MCPToolClient(self.tools) if self.transport == "mcp" else None
+        self.time_budget_s = time_budget_s
+        self._deadline: float | None = None
 
     @property
     def mode(self) -> str:
-        return "claude" if self.llm else "offline"
+        return "llm" if self.llm else "offline"
 
-    def run(self, question: str, on_event: Callable[[Event], None] = lambda e: None) -> InvestigationResult:
+    @property
+    def provider(self) -> str | None:
+        return getattr(self.llm, "provider", "anthropic") if self.llm else None
+
+    def _out_of_time(self) -> bool:
+        return self._deadline is not None and time.monotonic() >= self._deadline
+
+    def run(self, question: str, on_event: Callable[[Event], None] = lambda e: None,
+            requirements: str | None = None) -> InvestigationResult:
         question = question.strip()
         if not question:
             raise ValueError("Question is empty.")
-        result = InvestigationResult(question=question, mode=self.mode)
+        self._deadline = time.monotonic() + self.time_budget_s if self.time_budget_s else None
+        result = InvestigationResult(question=question, mode=self.mode, provider=self.provider,
+                                     model=getattr(self.llm, "model", None), requirements=requirements or None)
         if not self.store.list_papers():
             result.report_markdown = "# Investigation\n\nNo papers have been ingested yet. Ingest PDFs first."
             result.warnings.append("Knowledge graph is empty.")
             return result
-        if self.llm:
+        if self.llm and hasattr(self.llm, "chat"):
+            self._run_grounded(question, requirements, result, on_event)
+        elif self.llm:
             try:
                 self._run_claude(question, result, on_event)
             except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
@@ -80,6 +110,7 @@ class Investigator:
                 self._run_offline(question, result, on_event)
         else:
             self._run_offline(question, result, on_event)
+        self._ensure_coverage(question, result, on_event)
 
         body, refs, warnings = finalize_citations(
             result.report_markdown, result.evidence,
@@ -90,22 +121,48 @@ class Investigator:
         return result
 
     # ------------------------------------------------------------------ helpers
-    def _call(self, name: str, args: dict, result: InvestigationResult, on_event) -> dict:
+    def _call(self, name: str, args: dict, result: InvestigationResult, on_event, source: str = "agent") -> dict:
         on_event({"type": "tool_call", "tool": name, "args": args})
         try:
-            output = call_tool(self.tools, name, args)
+            if self.mcp is not None:
+                output = self.mcp.call(name, args)
+            else:
+                output = call_tool(self.tools, name, args)
+        except MCPToolError as e:
+            log.warning("MCP tool %s failed: %s", name, e)
+            output = {"error": f"{name} failed: {e}"}
         except TypeError as e:
             output = {"error": f"Invalid arguments for {name}: {e}"}
         except Exception as e:
             log.exception("Tool %s failed", name)
             output = {"error": f"{name} failed: {e}"}
+        if not isinstance(output, dict):
+            output = {"error": f"{name} returned an unexpected result"}
+        result.raw.append({"tool": name, "args": args, "output": output})
         collect_evidence(output, result.evidence)
-        if name == "find_research_gaps" and isinstance(output, dict):
+        if name == "find_research_gaps" and "error" not in output:
             result.gaps = output.get("gaps", result.gaps)
         summary = _summarize(name, output)
-        result.steps.append({"tool": name, "args": args, "summary": summary})
+        result.steps.append({"tool": name, "args": args, "summary": summary, "source": source, "ok": "error" not in output})
         on_event({"type": "tool_result", "tool": name, "summary": summary})
         return output
+
+    # ------------------------------------------------------------------ grounded (Ollama) path
+    def _run_grounded(self, question: str, requirements: str | None, result: InvestigationResult, on_event) -> None:
+        name = f"{self.provider} / {getattr(self.llm, 'model', '')}"
+        try:
+            GroundedInvestigation(self, requirements).run(question, result, on_event)
+        except NoRelevantEvidence:
+            on_event({"type": "status", "message": "No stored evidence is relevant - the model was not asked"})
+            result.warnings.append("No ingested paper contains evidence relevant to this question, so the LLM was not asked.")
+            result.mode = "offline"
+            result.report_markdown = _no_evidence_report(question, self.store.list_papers())
+        except LLMUnavailable as e:
+            log.warning("LLM %s unavailable (%s): %s", name, e.code, e)
+            result.warnings.append(f"LLM {name} unavailable ({e.code}: {e}). Showing the offline report instead.")
+            on_event({"type": "status", "message": f"LLM unavailable ({e.code}) - switching to the offline plan"})
+            result.mode = "offline"
+            self._run_offline(question, result, on_event)
 
     # ------------------------------------------------------------------ Claude loop
     def _run_claude(self, question: str, result: InvestigationResult, on_event) -> None:
@@ -113,8 +170,11 @@ class Investigator:
         on_event({"type": "status", "message": "Claude is planning the investigation"})
         final_text = ""
         for turn in range(self.max_turns + 1):
-            last_turn = turn == self.max_turns
+            last_turn = turn == self.max_turns or self._out_of_time()
             if last_turn:
+                if turn < self.max_turns:
+                    result.warnings.append("The investigation time budget was reached; the report uses the evidence gathered so far.")
+                    on_event({"type": "status", "message": "Time budget reached - writing the report"})
                 messages.append({"role": "user", "content": "Tool budget reached. Write the final report now using the evidence gathered."})
             with_tools = {"tools": TOOL_SPECS} if not last_turn else {"tools": TOOL_SPECS, "tool_choice": {"type": "none"}}
             response = self.llm.create(
@@ -160,30 +220,75 @@ class Investigator:
         on_event({"type": "status", "message": "Verifying citations"})
         result.report_markdown = f"# Investigation: {question}\n\n" + _strip_title(final_text)
 
+    # ------------------------------------------------------------------ coverage
+    def _ensure_coverage(self, question: str, result: InvestigationResult, on_event) -> None:
+        """Guarantee the evidence base behind the structured report, whichever path the agent took.
+
+        Claude picks its own tools; if it skipped evidence search, claim comparison, gap finding or
+        paper records, each is run once here so findings, comparisons, gaps and limitations always
+        come from graph evidence rather than from the narrative alone."""
+        called = {r["tool"] for r in result.raw if "error" not in r["output"]}
+        if "search_evidence" not in called:
+            self._call("search_evidence", {"query": question, "top_k": 8}, result, on_event, source="coverage")
+        if "compare_claims" not in called:
+            self._call("compare_claims", {"topic": question, "top_k": 10}, result, on_event, source="coverage")
+        if "find_research_gaps" not in called:
+            self._call("find_research_gaps", {"topic": question, "max_gaps": 6}, result, on_event, source="coverage")
+        if "get_paper" not in called:
+            hits = next((r["output"].get("results", []) for r in result.raw
+                         if r["tool"] == "search_evidence" and "error" not in r["output"]), [])
+            relevant = [h for h in hits if (h.get("score") or 0) >= MIN_RELEVANCE and h.get("paper_id")]
+            for pid in list(dict.fromkeys(h["paper_id"] for h in relevant))[:3]:
+                self._call("get_paper", {"paper_id": pid}, result, on_event, source="coverage")
+
     # ------------------------------------------------------------------ offline plan
     def _run_offline(self, question: str, result: InvestigationResult, on_event) -> None:
         on_event({"type": "status", "message": "Running offline investigation plan (no LLM configured)"})
-        papers = self._call("list_papers", {}, result, on_event)["papers"]
-        evidence = self._call("search_evidence", {"query": question, "top_k": 8}, result, on_event)["results"]
+        papers = self._call("list_papers", {}, result, on_event).get("papers", [])
+        evidence = self._call("search_evidence", {"query": question, "top_k": 8}, result, on_event).get("results", [])
         comparison = self._call("compare_claims", {"topic": question, "top_k": 10}, result, on_event)
+        if "error" in comparison:
+            comparison = {}
+        evidence, comparison = _relevant_only(evidence, comparison)
+        if not evidence and not comparison.get("statements_by_paper"):
+            on_event({"type": "status", "message": "No stored evidence is relevant to this question"})
+            result.report_markdown = _no_evidence_report(question, papers)
+            return
 
         # Traverse from entities named in the question or the top evidence
-        entity_rows = self.store.query("MATCH (e) WHERE e:Method OR e:Dataset RETURN e.name AS name, labels(e)[0] AS label", read_only=True)
-        q_low = question.lower()
-        named = [r["name"] for r in entity_rows if r["name"].lower() in q_low]
+        entity_rows = self._call("graph_query", {"cypher": "MATCH (e) WHERE e:Method OR e:Dataset RETURN e.name AS name, labels(e)[0] AS label"},
+                                 result, on_event).get("rows", [])
+        named = [r["name"] for r in entity_rows if _mentions(r["name"], question)]
         if not named:
-            top_text = " ".join(e["text"].lower() for e in evidence[:3])
-            named = [r["name"] for r in entity_rows if r["label"] == "Method" and r["name"].lower() in top_text]
-        explored = [self._call("explore_entity", {"name": n}, result, on_event) for n in named[:2]]
+            top_text = " ".join(e["text"] for e in evidence[:3])
+            named = [r["name"] for r in entity_rows if r["label"] == "Method" and _mentions(r["name"], top_text)]
+        explored = [x for x in (self._call("explore_entity", {"name": n}, result, on_event) for n in named[:2]) if "error" not in x]
 
         top_papers = list(dict.fromkeys(e["paper_id"] for e in evidence))[:3]
-        details = [self._call("get_paper", {"paper_id": pid}, result, on_event) for pid in top_papers]
-        gaps = self._call("find_research_gaps", {"topic": question, "max_gaps": 6}, result, on_event)["gaps"]
+        details = [d for d in (self._call("get_paper", {"paper_id": pid}, result, on_event) for pid in top_papers) if "error" not in d]
+        gaps = self._call("find_research_gaps", {"topic": question, "max_gaps": 6}, result, on_event).get("gaps", [])
         on_event({"type": "status", "message": "Assembling extractive report"})
         result.report_markdown = _offline_report(question, papers, evidence, comparison, explored, details, gaps)
 
 
 # ---------------------------------------------------------------------- formatting helpers
+
+_STOP = {"of", "for", "the", "and", "a", "an", "on", "in", "with", "to", "model", "models", "network", "networks"}
+
+
+def _mentions(entity: str, text: str) -> bool:
+    """True if `text` names the entity: full name, its acronym (GAT), or all its distinctive words."""
+    name, low = entity.lower(), text.lower()
+    if re.search(rf"\b{re.escape(name)}\b", low):
+        return True
+    words = re.findall(r"[a-z0-9]+", name)
+    acronym = "".join(w[0] for w in words)
+    tokens = set(re.findall(r"[a-z0-9]+", low))
+    if len(words) >= 2 and len(acronym) >= 2 and acronym in tokens:
+        return True
+    distinctive = [w for w in words if w not in _STOP]
+    return len(distinctive) >= 2 and all(w in tokens for w in distinctive)
+
 
 def _strip_title(text: str) -> str:
     return re.sub(r"^\s*#\s+[^\n]*\n+", "", text, count=1)
@@ -219,6 +324,32 @@ def _summarize(name: str, output: dict) -> str:
 
 def _cite(chunk_id: str) -> str:
     return f"[{chunk_id}]"
+
+
+def _relevant_only(evidence: list[dict], comparison: dict) -> tuple[list[dict], dict]:
+    """Drop passages and statements below the relevance threshold, and relations not touching the rest."""
+    evidence = [e for e in evidence if (e.get("score") or 0) >= MIN_RELEVANCE]
+    by_paper = {}
+    for title, stmts in comparison.get("statements_by_paper", {}).items():
+        kept = [x for x in stmts if (x.get("relevance") or 0) >= MIN_RELEVANCE]
+        if kept:
+            by_paper[title] = kept
+    texts = {x["text"] for stmts in by_paper.values() for x in stmts}
+    touches = lambda r: r.get("statement_a") in texts or r.get("statement_b") in texts  # noqa: E731
+    return evidence, {**comparison, "statements_by_paper": by_paper,
+                      "contradictions": [r for r in comparison.get("contradictions", []) if touches(r)],
+                      "related_statements": [r for r in comparison.get("related_statements", []) if touches(r)]}
+
+
+def _no_evidence_report(question: str, papers: list) -> str:
+    return "\n".join([
+        f"# Investigation: {question}", "",
+        "## Answer", "",
+        f"The {len(papers)} ingested papers do not contain evidence relevant to this question: no passage or extracted "
+        f"statement reached the relevance threshold ({MIN_RELEVANCE}). ResearchMind answers only from the ingested papers, "
+        "so no answer is given.", "",
+        "## Confidence", "",
+        "Low: there is no supporting evidence in the corpus. Upload papers on this topic or rephrase the question.", ""])
 
 
 def _offline_report(question, papers, evidence, comparison, explored, details, gaps) -> str:

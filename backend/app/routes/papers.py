@@ -9,9 +9,10 @@ from starlette.concurrency import run_in_threadpool
 
 from researchmind.documents import DocumentStore
 from researchmind.graph import GraphStore
+from researchmind.projects import Project
 
 from ..config import get_api_settings
-from ..database import get_store
+from ..database import get_project, get_store
 from ..schemas.paper import PaperDetailResponse, PaperListResponse, UploadResponse
 from ..services import graph_service
 from ..services.pdf_service import UploadRejected, process_upload, stage_upload
@@ -22,13 +23,13 @@ router = APIRouter(prefix="/papers", tags=["papers"])
 PaperId = Annotated[str, Path(pattern=r"^p_[0-9a-f]{12}$", description="Paper id: p_ + first 12 hex chars of the SHA-256")]
 
 
-def get_documents() -> DocumentStore:
-    return DocumentStore()
+def get_documents(project: Project = Depends(get_project)) -> DocumentStore:
+    return DocumentStore(project.documents_dir)
 
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_papers(files: Annotated[list[UploadFile], File(description="One or more PDF files")],
-                        store: GraphStore = Depends(get_store)) -> dict:
+                        store: GraphStore = Depends(get_store), project: Project = Depends(get_project)) -> dict:
     settings = get_api_settings()
     if len(files) > settings.max_files_per_upload:
         raise HTTPException(400, f"Too many files: at most {settings.max_files_per_upload} per upload.")
@@ -36,13 +37,13 @@ async def upload_papers(files: Annotated[list[UploadFile], File(description="One
     results = []
     for f in files:
         try:
-            staged = await stage_upload(f)
+            staged = await stage_upload(f, project.upload_dir)
         except UploadRejected as e:
             results.append({"filename": f.filename or "unnamed", "status": "rejected",
                             "message": str(e), "error_code": e.code})
             continue
         # Parsing and graph writes are blocking work: keep them off the event loop.
-        results.append(await run_in_threadpool(process_upload, staged, store))
+        results.append(await run_in_threadpool(process_upload, staged, store, project))
 
     summary = {"received": len(files), **{k: sum(r["status"] == k for r in results)
                                           for k in ("processed", "duplicate", "failed", "rejected")}}
@@ -72,9 +73,9 @@ def get_paper(paper_id: PaperId,
 
 
 @router.get("/{paper_id}/file", response_class=FileResponse)
-def download_pdf(paper_id: PaperId, store: GraphStore = Depends(get_store)):
+def download_pdf(paper_id: PaperId, store: GraphStore = Depends(get_store), project: Project = Depends(get_project)):
     rows = store.query("MATCH (p:Paper {id: $id}) RETURN p.source_file AS filename", {"id": paper_id}, read_only=True)
-    path = get_api_settings().upload_dir / f"{paper_id}.pdf"
+    path = project.upload_dir / f"{paper_id}.pdf"
     if not rows or not path.exists():
         raise HTTPException(404, "Original PDF not available.")
     return FileResponse(path, media_type="application/pdf", filename=rows[0]["filename"] or f"{paper_id}.pdf",
@@ -82,7 +83,7 @@ def download_pdf(paper_id: PaperId, store: GraphStore = Depends(get_store)):
 
 
 @router.delete("/{paper_id}", status_code=204)
-def delete_paper(paper_id: PaperId, store: GraphStore = Depends(get_store),
+def delete_paper(paper_id: PaperId, store: GraphStore = Depends(get_store), project: Project = Depends(get_project),
                  documents: DocumentStore = Depends(get_documents)) -> None:
-    if not graph_service.delete_paper(store, documents, paper_id, get_api_settings().upload_dir):
+    if not graph_service.delete_paper(store, documents, paper_id, project.upload_dir):
         raise HTTPException(404, "Paper not found.")

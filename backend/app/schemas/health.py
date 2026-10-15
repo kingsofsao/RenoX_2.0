@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class BackendHealth(BaseModel):
@@ -20,11 +20,24 @@ class DatabaseHealth(BaseModel):
     message: str | None
 
 
+class LLMStatus(BaseModel):
+    provider: str = Field(description="ollama | anthropic | none")
+    model: str | None
+    status: Literal["ready", "configured", "model_missing", "unreachable", "not_configured", "error"]
+    reachable: bool | None
+    model_available: bool | None
+    message: str
+    base_url: str | None = None
+    installed_models: list[str] = []
+    version: str | None = None
+
+
 class ConfigInfo(BaseModel):
     max_upload_mb: int
     max_files_per_upload: int
     llm_configured: bool
     embedding_model: str | None
+    llm: LLMStatus
 
 
 class HealthResponse(BaseModel):

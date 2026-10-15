@@ -14,6 +14,9 @@ import pytest
 
 # Keep test output (processed JSON, reports) out of the real data/ folder.
 os.environ["RESEARCHMIND_DATA_DIR"] = tempfile.mkdtemp(prefix="researchmind-test-")
+# Tests choose their LLM explicitly (mocks); backend/.env's provider must not leak in.
+# Live tests (test_ollama_live.py) construct OllamaLLM directly from LLM_MODEL / OLLAMA_BASE_URL.
+os.environ["LLM_PROVIDER"] = "none"
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -58,3 +61,18 @@ def store():
 def ingested(store, sample_pdfs):
     from researchmind.pipeline import ingest_file
     return [ingest_file(p, store, use_llm=False) for p in sample_pdfs]
+
+
+@pytest.fixture(autouse=True)
+def memory_registry(request):
+    """Mocked tests get an in-memory project registry; integration tests use the real FalkorDB one."""
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("live_llm"):
+        yield None
+        return
+    from app import database
+    from app.main import app
+    from researchmind.projects import MemoryRegistry
+    registry = MemoryRegistry()
+    app.dependency_overrides[database.get_registry] = lambda: registry
+    yield registry
+    app.dependency_overrides.pop(database.get_registry, None)

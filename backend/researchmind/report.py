@@ -20,7 +20,10 @@ CITATION = re.compile(rf"\[\s*({CHUNK_ID}(?:\s*[,;]\s*{CHUNK_ID})*)\s*\]")
 @dataclass
 class InvestigationResult:
     question: str
-    mode: str
+    mode: str                      # "llm" | "offline"
+    provider: str | None = None    # "ollama" | "anthropic" when mode == "llm"
+    model: str | None = None
+    requirements: str | None = None
     report_markdown: str = ""
     steps: list[dict] = field(default_factory=list)
     evidence: dict[str, dict] = field(default_factory=dict)
@@ -28,9 +31,13 @@ class InvestigationResult:
     gaps: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    # Full tool outputs, used to build the structured report; not serialized.
+    raw: list[dict] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("raw", None)
+        return data
 
 
 def collect_evidence(obj, registry: dict[str, dict]) -> None:

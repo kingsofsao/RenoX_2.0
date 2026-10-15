@@ -11,14 +11,14 @@ from .documents import DocumentStore
 from .extract import HeuristicExtractor, get_extractor
 from .graph import GraphStore
 from .ingest import IngestionError, file_sha256, parse_pdf
-from .llm import get_llm
+from .llm import get_extraction_llm
 
 log = logging.getLogger(__name__)
 
 
 def ingest_file(path: str | Path, store: GraphStore, force: bool = False, use_llm: bool | None = None,
                 progress=lambda msg: None, source_name: str | None = None,
-                documents: DocumentStore | None = None) -> dict:
+                documents: DocumentStore | None = None, processed_dir: Path | None = None) -> dict:
     """Ingest one PDF and return a summary dict with status "ingested" or "unchanged".
 
     Unchanged papers (same content hash, same extractor, page store present) are skipped without
@@ -34,7 +34,7 @@ def ingest_file(path: str | Path, store: GraphStore, force: bool = False, use_ll
     paper_id = "p_" + sha[:12]
     file_size = path.stat().st_size
 
-    llm = get_llm() if (settings.use_llm_extraction if use_llm is None else use_llm) else None
+    llm = get_extraction_llm() if (settings.use_llm_extraction if use_llm is None else use_llm) else None
     extractor = get_extractor(llm)
 
     existing = store.get_paper(paper_id)
@@ -70,7 +70,7 @@ def ingest_file(path: str | Path, store: GraphStore, force: bool = False, use_ll
     summary = store.upsert_paper(paper, extraction, document_key=document_key, file_size=file_size)
 
     # Keep a JSON copy of what was extracted, for inspection and debugging.
-    out_dir = settings.data_dir / "processed"
+    out_dir = processed_dir or settings.data_dir / "processed"
     out_dir.mkdir(parents=True, exist_ok=True)
     paper_meta = {k: v for k, v in paper.to_dict().items() if k != "pages"}
     (out_dir / f"{paper.id}.json").write_text(

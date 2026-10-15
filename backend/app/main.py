@@ -20,8 +20,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from researchmind import __version__
 
 from .config import get_api_settings
+from researchmind.projects import ProjectError
+
 from .database import DatabaseUnavailable, reset_store
-from .routes import graph, health, papers
+from .routes import graph, health, investigations, papers, projects
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("researchmind.api")
@@ -51,7 +53,7 @@ app = FastAPI(title="ResearchMind AI API", version=__version__, lifespan=lifespa
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_api_settings().allowed_origins,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -89,6 +91,12 @@ async def validation_error(_: Request, exc: RequestValidationError):
     return _error(422, f"Invalid request{detail}: {first.get('msg', 'validation failed')}", "validation_error")
 
 
+@app.exception_handler(ProjectError)
+async def project_error(_: Request, exc: ProjectError):
+    status = {"not_found": 404, "invalid": 422, "conflict": 409, "forbidden": 403}.get(exc.code, 400)
+    return _error(status, str(exc), f"project_{exc.code}")
+
+
 @app.exception_handler(Exception)
 async def unhandled(_: Request, exc: Exception):
     log.exception("Unhandled error")  # the traceback stays in server logs only
@@ -96,8 +104,14 @@ async def unhandled(_: Request, exc: Exception):
 
 
 app.include_router(health.router, prefix="/api")
-app.include_router(papers.router, prefix="/api")
-app.include_router(graph.router, prefix="/api")
+app.include_router(projects.router, prefix="/api")
+# Project-scoped data routes. The project (and so the FalkorDB graph and data folder) comes from the
+# URL and is resolved on the server by database.get_project.
+for _router in (papers.router, graph.router, investigations.router):
+    app.include_router(_router, prefix="/api/projects/{project_id}")
+# Legacy unscoped routes = the Default project (pre-project clients and scripts keep working).
+for _router in (papers.router, graph.router, investigations.router):
+    app.include_router(_router, prefix="/api", deprecated=True)
 
 
 @app.get("/", include_in_schema=False)

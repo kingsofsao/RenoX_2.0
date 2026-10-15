@@ -2,7 +2,8 @@
 
 Uploads are streamed in 1 MB chunks to a temp file while hashing, so a file is never held
 in memory and oversized files are cut off as soon as they cross the limit. Accepted files
-are stored content-addressed as <upload_dir>/<paper_id>.pdf.
+are stored content-addressed as <project upload_dir>/<paper_id>.pdf - per project, so the same
+PDF in two projects is two independent copies and deleting it in one never affects the other.
 """
 
 from __future__ import annotations
@@ -18,9 +19,11 @@ from pathlib import Path
 
 from fastapi import UploadFile
 
+from researchmind.documents import DocumentStore
 from researchmind.graph import GraphStore
 from researchmind.ingest import IngestionError
 from researchmind.pipeline import ingest_file
+from researchmind.projects import Project
 
 from ..config import get_api_settings
 
@@ -56,15 +59,16 @@ def safe_filename(name: str | None) -> str:
     return base[:180]
 
 
-async def stage_upload(file: UploadFile) -> StagedUpload:
+async def stage_upload(file: UploadFile, upload_dir: Path | None = None) -> StagedUpload:
     """Validate and stream one upload to disk. Raises UploadRejected for invalid files."""
     settings = get_api_settings()
+    upload_dir = upload_dir or settings.upload_dir
     filename = safe_filename(file.filename)
     if not filename.lower().endswith(".pdf"):
         raise UploadRejected(f"{filename} is not a PDF (only .pdf files are accepted).", "not_pdf")
 
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(suffix=".pdf.part", dir=settings.upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(suffix=".pdf.part", dir=upload_dir)
     tmp = Path(tmp_name)
     digest, size, first = hashlib.sha256(), 0, True
     try:
@@ -89,7 +93,7 @@ async def stage_upload(file: UploadFile) -> StagedUpload:
         await file.close()
 
     sha = digest.hexdigest()
-    final = settings.upload_dir / f"p_{sha[:12]}.pdf"
+    final = upload_dir / f"p_{sha[:12]}.pdf"
     if final.exists():
         tmp.unlink(missing_ok=True)  # identical content already stored
     else:
@@ -97,11 +101,13 @@ async def stage_upload(file: UploadFile) -> StagedUpload:
     return StagedUpload(filename=filename, path=final, sha256=sha, size=size)
 
 
-def process_upload(staged: StagedUpload, store: GraphStore) -> dict:
-    """Run ingestion for a staged upload and return an UploadResult-shaped dict."""
+def process_upload(staged: StagedUpload, store: GraphStore, project: Project | None = None) -> dict:
+    """Run ingestion for a staged upload into the project's graph and folders."""
+    documents = DocumentStore(project.documents_dir) if project else None
     with _ingest_lock:
         try:
-            result = ingest_file(staged.path, store, source_name=staged.filename)
+            result = ingest_file(staged.path, store, source_name=staged.filename, documents=documents,
+                                 processed_dir=project.processed_dir if project else None)
         except IngestionError as e:
             log.info("Ingestion failed for %s (%s): %s", staged.filename, e.code, e)
             return {"filename": staged.filename, "status": "failed", "paper_id": staged.paper_id,

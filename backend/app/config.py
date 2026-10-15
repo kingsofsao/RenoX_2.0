@@ -25,6 +25,8 @@ class ApiSettings:
     upload_dir: Path
     graph_name: str
     falkordb_configured: bool
+    investigation_timeout_s: float = 240.0
+    investigation_max_concurrent: int = 2
 
     @property
     def max_upload_bytes(self) -> int:
@@ -42,4 +44,6 @@ def get_api_settings() -> ApiSettings:
         upload_dir=Path(os.getenv("UPLOAD_DIR", core.data_dir / "uploads")),
         graph_name=core.graph_name,
         falkordb_configured=bool(core.falkordb_url),
+        investigation_timeout_s=float(_int("INVESTIGATION_TIMEOUT_SECONDS", 240)),
+        investigation_max_concurrent=_int("INVESTIGATION_MAX_CONCURRENT", 2),
     )

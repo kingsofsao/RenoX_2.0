@@ -55,8 +55,10 @@ def test_claude_loop_with_fake_client(ingested, store):
     events = []
     result = Investigator(store, llm=fake).run("Do graph models generalize?", on_event=events.append)
 
-    assert result.mode == "claude"
-    assert [s["tool"] for s in result.steps] == ["search_evidence", "find_research_gaps"]
+    assert result.mode == "llm"
+    assert [s["tool"] for s in result.steps if s["source"] == "agent"] == ["search_evidence", "find_research_gaps"]
+    # Coverage fills in what Claude skipped (claim comparison, paper records)
+    assert {"compare_claims", "get_paper"} <= {s["tool"] for s in result.steps if s["source"] == "coverage"}
     assert result.gaps  # captured from the gap tool
     # Both tool results went back in ONE user message, matched to their tool_use ids
     tool_msg = fake.requests[1]["messages"][2]
@@ -75,7 +77,7 @@ def test_claude_loop_with_fake_client(ingested, store):
 
 def test_claude_refusal_falls_back_to_offline(ingested, store):
     fake = FakeLLM([SimpleNamespace(stop_reason="refusal", content=[])])
-    result = Investigator(store, llm=fake).run("Any question")
+    result = Investigator(store, llm=fake).run("Do graph models generalize to unseen proteins?")
     assert result.mode == "offline" and result.references
     assert any("declined" in w for w in result.warnings)
 

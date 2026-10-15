@@ -1,8 +1,12 @@
-"""FalkorDB connection management for the API.
+"""FalkorDB connection management for the API, per project.
 
-One GraphStore is shared across requests (the underlying redis client pools connections and
-is thread-safe). If the database is down at startup or drops later, the next request retries.
-Error details are logged server-side; clients only ever see generic messages.
+One FalkorDB client (connection pool) is shared by the project registry and every project's
+GraphStore. Routes receive the store of the project named in the URL (`/api/projects/{id}/...`);
+legacy unscoped routes (`/api/papers`, ...) resolve to the Default project. The project - and so
+the graph - is always chosen here on the server, never by the client.
+
+If the database is down at startup or drops later, the next request retries. Error details are
+logged server-side; clients only ever see generic messages.
 """
 
 from __future__ import annotations
@@ -11,10 +15,13 @@ import logging
 import threading
 import time
 
+from fastapi import Depends, Request
+from falkordb import FalkorDB
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
 from researchmind.config import get_settings
 from researchmind.graph import GraphConnectionError, GraphStore
+from researchmind.projects import DEFAULT_PROJECT_ID, LOCAL_OWNER, FalkorRegistry, Project
 
 log = logging.getLogger("researchmind.api.database")
 
@@ -27,41 +34,103 @@ class DatabaseUnavailable(Exception):
         self.reason = reason  # "not_configured" | "unavailable"
 
 
-_store: GraphStore | None = None
-_lock = threading.Lock()
+_db: FalkorDB | None = None
+_registry: FalkorRegistry | None = None
+_stores: dict[str, GraphStore] = {}
+_lock = threading.RLock()
 
 
-def _connect() -> GraphStore:
+def _client() -> FalkorDB:
+    global _db
     settings = get_settings()
     if not settings.falkordb_url:
         raise DatabaseUnavailable("not_configured")
-    try:
-        store = GraphStore()
-    except GraphConnectionError as e:
-        log.warning("FalkorDB connection failed: %s", e)  # message never contains the password
-        raise DatabaseUnavailable("unavailable") from e
-    log.info("Connected to FalkorDB graph '%s'", store.graph_name)
-    return store
+    if _db is None:
+        try:
+            db = FalkorDB.from_url(settings.falkordb_url)
+            db.connection.ping()
+        except Exception as e:
+            log.warning("FalkorDB connection failed: %s", e.__class__.__name__)  # never log the URL
+            raise DatabaseUnavailable("unavailable") from e
+        _db = db
+    return _db
 
 
-def get_store() -> GraphStore:
-    """FastAPI dependency: the shared GraphStore, connecting lazily."""
-    global _store
-    if _store is not None:
-        return _store
+def get_registry() -> FalkorRegistry:
+    """The project registry (projects + saved investigations)."""
+    global _registry
+    if _registry is not None:
+        return _registry
     with _lock:
-        if _store is None:
-            _store = _connect()
-        return _store
+        if _registry is None:
+            try:
+                reg = FalkorRegistry(_client())
+                reg.ensure_default()
+                n = reg.mark_interrupted()
+                if n:
+                    log.info("Marked %d investigation(s) interrupted by the previous shutdown", n)
+            except DatabaseUnavailable:
+                raise
+            except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+                log.warning("Registry unavailable: %s", e)
+                reset_store()
+                raise DatabaseUnavailable("unavailable") from e
+            _registry = reg
+        return _registry
+
+
+def get_principal() -> str:
+    """The acting user. No authentication yet: everyone is the local owner (see projects.authorize)."""
+    return LOCAL_OWNER
+
+
+def get_project(request: Request, owner: str = Depends(get_principal),
+                registry=Depends(get_registry)) -> Project:
+    """Project from the URL path (`project_id`), or the Default project for legacy unscoped routes."""
+    project_id = request.path_params.get("project_id", DEFAULT_PROJECT_ID)
+    return registry.get_project(project_id, owner)  # raises ProjectError(not_found) -> 404
+
+
+def store_for(project: Project) -> GraphStore:
+    """Cached GraphStore bound to the project's own graph."""
+    store = _stores.get(project.id)
+    if store is not None:
+        return store
+    with _lock:
+        store = _stores.get(project.id)
+        if store is None:
+            try:
+                store = GraphStore(graph_name=project.graph_name, db=_client())
+            except GraphConnectionError as e:
+                log.warning("FalkorDB connection failed: %s", e)
+                raise DatabaseUnavailable("unavailable") from e
+            _stores[project.id] = store
+            log.info("Opened graph for project %s", project.id)
+        return store
+
+
+def get_store(project: Project = Depends(get_project)) -> GraphStore:
+    """FastAPI dependency: the GraphStore of the request's project."""
+    return store_for(project)
+
+
+def forget_project(project_id: str) -> None:
+    with _lock:
+        _stores.pop(project_id, None)
 
 
 def reset_store() -> None:
-    """Drop the cached connection so the next request reconnects (after a connection error)."""
-    global _store
+    """Drop cached connections so the next request reconnects (after a connection error)."""
+    global _db, _registry
     with _lock:
-        if _store is not None:
-            _store.close()
-        _store = None
+        _stores.clear()
+        _registry = None
+        if _db is not None:
+            try:
+                _db.close()
+            except Exception:
+                pass
+        _db = None
 
 
 def check_database() -> dict:
@@ -71,16 +140,16 @@ def check_database() -> dict:
         return {"status": "not_configured", "graph": settings.graph_name, "latency_ms": None,
                 "message": "FALKORDB_URL is not set in backend/.env"}
     try:
-        store = get_store()
+        db = _client()
         start = time.perf_counter()
-        store.query("RETURN 1", read_only=True)
+        db.connection.ping()
         latency = round((time.perf_counter() - start) * 1000, 1)
-        return {"status": "connected", "graph": store.graph_name, "latency_ms": latency, "message": None}
+        return {"status": "connected", "graph": settings.graph_name, "latency_ms": latency, "message": None}
     except DatabaseUnavailable:
         return {"status": "unavailable", "graph": settings.graph_name, "latency_ms": None,
                 "message": "Could not connect to FalkorDB"}
     except (RedisConnectionError, RedisTimeoutError, OSError) as e:
-        log.warning("FalkorDB health probe failed: %s", e)
+        log.warning("FalkorDB health probe failed: %s", e.__class__.__name__)
         reset_store()
         return {"status": "unavailable", "graph": settings.graph_name, "latency_ms": None,
                 "message": "Lost connection to FalkorDB"}

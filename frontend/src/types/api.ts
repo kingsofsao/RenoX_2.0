@@ -87,11 +87,23 @@ export interface UploadResponse {
 
 export type DatabaseStatus = 'connected' | 'unavailable' | 'not_configured'
 
+export interface LLMStatus {
+  provider: 'ollama' | 'anthropic' | 'none' | string
+  model: string | null
+  status: 'ready' | 'configured' | 'model_missing' | 'unreachable' | 'not_configured' | 'error'
+  reachable: boolean | null
+  model_available: boolean | null
+  message: string
+  base_url?: string | null
+  installed_models?: string[]
+  version?: string | null
+}
+
 export interface HealthResponse {
   status: 'ok' | 'degraded'
   backend: { status: 'ok'; version: string; uptime_seconds: number }
   database: { status: DatabaseStatus; graph: string; latency_ms: number | null; message: string | null }
-  config: { max_upload_mb: number; max_files_per_upload: number; llm_configured: boolean; embedding_model: string | null }
+  config: { max_upload_mb: number; max_files_per_upload: number; llm_configured: boolean; embedding_model: string | null; llm: LLMStatus }
   timestamp: string
 }
 
@@ -105,6 +117,161 @@ export interface GraphOverview {
   edges: { id: string; source: string; target: string; type: string; score: number | null }[]
 }
 
+export interface Project {
+  id: string
+  name: string
+  description: string
+  owner_id: string
+  created_at: string
+  updated_at: string
+  is_default: boolean
+  paper_count: number | null
+  investigation_count: number | null
+}
+
 export interface ApiErrorBody {
   error: { code: string; message: string }
+}
+
+// ---- Investigations (backend/app/schemas/investigation.py) ----
+
+export type InvestigationStatus = 'queued' | 'running' | 'completed' | 'failed'
+export type InvestigationMode = 'llm' | 'offline'
+
+export interface InvestigationSource {
+  n: number
+  chunk_id: string
+  paper_id: string
+  paper_title: string | null
+  year: number | null
+  page: number | null
+  section: string | null
+  quote: string
+  cited_in_report: boolean
+}
+
+export interface InvestigationFinding {
+  type: string
+  text: string
+  paper_id: string
+  paper_title: string | null
+  year: number | null
+  page: number | null
+  relevance: number | null
+  citations: number[]
+}
+
+export interface ComparisonSide {
+  text: string
+  paper_id: string
+  paper_title: string | null
+  page: number | null
+  citation: number
+}
+
+export interface InvestigationComparison {
+  kind: 'contradiction' | 'related'
+  score: number
+  a: ComparisonSide
+  b: ComparisonSide
+  note: string
+}
+
+export interface EntityComparison {
+  entity: string
+  type: 'method' | 'dataset'
+  papers: { paper_id: string; paper_title: string | null; citation: number }[]
+}
+
+export interface InvestigationGap {
+  id: string
+  title: string
+  type: string
+  rationale: string
+  score: number | null
+  status: 'candidate'
+  evidence: { citation: number; paper_id: string; paper_title: string | null; page: number | null; quote: string }[]
+  citations: number[]
+  note: string
+  support_papers: number
+}
+
+export interface InvestigationLimitation {
+  text: string
+  kind: 'limitation' | 'future_work'
+  paper_id: string
+  paper_title: string | null
+  page: number | null
+  citations: number[]
+}
+
+export interface InvestigationConfidence {
+  level: 'low' | 'moderate' | 'high'
+  reasons: string[]
+  uncertainties: string[]
+  narrative: string | null
+}
+
+export interface InvestigationStep {
+  tool: string
+  args: Record<string, unknown>
+  summary: string
+  source: string
+  ok: boolean
+}
+
+export interface InvestigationResultBody {
+  mode: InvestigationMode
+  /** False when no stored evidence reached the relevance threshold. */
+  evidence_found: boolean
+  summary: string
+  report_markdown: string
+  findings: InvestigationFinding[]
+  comparisons: InvestigationComparison[]
+  method_comparison: EntityComparison[]
+  gaps: InvestigationGap[]
+  inferences: { text: string; citations: number[] }[]
+  open_questions: string[]
+  limitations: InvestigationLimitation[]
+  confidence: InvestigationConfidence
+  sources: InvestigationSource[]
+  papers: { paper_id: string; title: string | null; year: number | null; sources: number }[]
+  steps: InvestigationStep[]
+  warnings: string[]
+}
+
+export interface ProgressEvent {
+  type: string
+  message: string
+  tool: string | null
+  at: number
+}
+
+export interface Investigation {
+  id: string
+  project_id: string
+  question: string
+  status: InvestigationStatus
+  mode: InvestigationMode | null
+  llm_configured: boolean
+  provider: string | null
+  model: string | null
+  requirements: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  duration_seconds: number | null
+  progress: ProgressEvent[]
+  result: InvestigationResultBody | null
+  error: { code: string; message: string } | null
+}
+
+export interface InvestigationSummary {
+  id: string
+  project_id: string
+  question: string
+  status: InvestigationStatus
+  mode: InvestigationMode | null
+  created_at: string
+  duration_seconds: number | null
 }

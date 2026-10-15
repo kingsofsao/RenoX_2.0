@@ -38,10 +38,10 @@ def cmd_check(args) -> int:
     from .embeddings import get_embedder
     emb = get_embedder()
     print(f"Embeddings: {emb.name} ({emb.dim} dims)")
-    if settings.has_llm:
-        print(f"Claude: API key configured, model {settings.anthropic_model}")
-    else:
-        print("Claude: not configured (ANTHROPIC_API_KEY unset) - extraction and investigation run in offline mode")
+    from .llm import llm_status
+    st = llm_status()
+    print(f"Investigation LLM: {st['provider']} {st.get('model') or ''} - {st['status']}: {st['message']}")
+    print("Extraction LLM: " + ("Claude" if settings.has_anthropic_key else "heuristic extractor (ANTHROPIC_API_KEY unset)"))
     return 0 if ok else 1
 
 

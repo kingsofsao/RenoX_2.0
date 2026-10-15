@@ -17,3 +17,7 @@ data/uploads/
 data/documents/
 data/processed/
 data/reports/
+
+# Per-project data (uploaded PDFs, page text) and dev logs
+data/projects/
+*.log

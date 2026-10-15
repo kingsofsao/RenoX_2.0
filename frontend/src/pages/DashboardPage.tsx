@@ -73,7 +73,7 @@ export function DashboardPage() {
                 ['Latency', health?.database.latency_ms != null ? `${health.database.latency_ms} ms` : '—'],
                 ['Upload limit', health ? `${health.config.max_upload_mb} MB · ${health.config.max_files_per_upload} files` : '—'],
                 ['Embeddings', health?.config.embedding_model ?? 'Loading…'],
-                ['LLM', health ? (health.config.llm_configured ? 'Configured' : 'Not configured') : '—'],
+                ['LLM', health ? (health.config.llm.provider === 'none' ? 'Not configured (offline mode)' : `${health.config.llm.provider} / ${health.config.llm.model ?? '?'} · ${health.config.llm.status.replace('_', ' ')}`) : '—'],
               ].map(([k, v]) => (
                 <div key={k} className="flex justify-between gap-4 px-5 py-2.5">
                   <dt className="text-slate-500">{k}</dt>

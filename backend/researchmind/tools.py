@@ -8,6 +8,7 @@ agent can cite the exact page it came from.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -16,6 +17,10 @@ from .extract import slug
 from .graph import GraphStore
 
 MAX_TEXT = 500
+# Calibrated on MiniLM-L6 over the sample corpus: on-topic matches score >= 0.45 (median), off-topic <= 0.26.
+MIN_RELEVANCE = float(os.getenv("MIN_EVIDENCE_RELEVANCE", "0.35"))
+# CONTRADICTS edges are candidate conflicts from a polarity heuristic; only strong ones are reported as conflicts.
+MIN_CONFLICT_SCORE = float(os.getenv("MIN_CONFLICT_SCORE", "0.7"))
 
 
 def _trim(text: str | None, n: int = MAX_TEXT) -> str:
@@ -197,10 +202,14 @@ class ResearchTools:
         by_paper: dict[str, list] = {}
         for s in sorted(statements, key=lambda s: -s["relevance"]):
             by_paper.setdefault(s["paper_title"], []).append(s)
+        strong = [r for r in relations if r["relation"] == "CONTRADICTS" and (r["score"] or 0) >= MIN_CONFLICT_SCORE]
+        weak = [r for r in relations if r["relation"] == "CONTRADICTS" and (r["score"] or 0) < MIN_CONFLICT_SCORE]
         return {"topic": topic, "statements_by_paper": by_paper,
-                "contradictions": [r for r in relations if r["relation"] == "CONTRADICTS"],
-                # SIMILAR_TO means "about the same thing", not necessarily agreement - the agent judges that
-                "related_statements": [r for r in relations if r["relation"] == "SIMILAR_TO"]}
+                "contradictions": strong,
+                # SIMILAR_TO means "about the same thing", not necessarily agreement - the agent judges that.
+                # Weak heuristic contradictions are listed here too: related, possibly in tension.
+                "related_statements": [r for r in relations if r["relation"] == "SIMILAR_TO"] + weak,
+                "note": f"Statements with relevance below {MIN_RELEVANCE} are only loosely related to the topic."}
 
     # ------------------------------------------------------------------ gaps
     def find_research_gaps(self, topic: str | None = None, max_gaps: int = 8) -> dict:
@@ -240,10 +249,11 @@ class ResearchTools:
         # 2. Contradictory evidence between papers (one gap per paper pair, strongest conflict first)
         pairs: dict[frozenset, list[dict]] = {}
         for r in self.store.query(
-                """MATCH (a)-[x:CONTRADICTS]->(b) MATCH (pa:Paper)-[]->(a)-[:SUPPORTED_BY]->(ca:Chunk)
+                """MATCH (a)-[x:CONTRADICTS]->(b) WHERE x.score >= $min
+                   MATCH (pa:Paper)-[]->(a)-[:SUPPORTED_BY]->(ca:Chunk)
                    MATCH (pb:Paper)-[]->(b)-[:SUPPORTED_BY]->(cb:Chunk)
                    RETURN a.text AS a, b.text AS b, pa.title AS pa, pb.title AS pb, ca.id AS ca, cb.id AS cb, ca.page AS pga, cb.page AS pgb, x.score AS score
-                   ORDER BY score DESC LIMIT 30""", read_only=True):
+                   ORDER BY score DESC LIMIT 30""", {"min": MIN_CONFLICT_SCORE}, read_only=True):
             pairs.setdefault(frozenset((r["pa"], r["pb"])), []).append(r)
         for conflicts in pairs.values():
             top = conflicts[0]
@@ -261,16 +271,19 @@ class ResearchTools:
                 "evidence": evidence,
                 "score": round(0.6 + 0.3 * float(top["score"]), 2), "_text": top["a"] + " " + top["b"]})
 
-        # 3. Untested method x dataset combinations among connected papers
+        # 3. Untested method x dataset combinations among papers of the same domain
+        #    (the method's paper and the dataset's paper share at least one dataset).
         combos = self.store.query(
             """MATCH (p1:Paper)-[r1:USES_METHOD]->(m:Method), (p2:Paper)-[r2:USES_DATASET]->(d:Dataset)
                WHERE NOT (m)<-[:USES_METHOD]-(:Paper)-[:USES_DATASET]->(d)
+                 AND p1 <> p2 AND (p1)-[:USES_DATASET]->(:Dataset)<-[:USES_DATASET]-(p2)
                WITH m, d, collect(DISTINCT p1.title) AS mp, collect(DISTINCT p2.title) AS dp,
                     collect(DISTINCT {chunk_id: r1.chunk_id, paper: p1.title, quote: r1.quote})[0..1] AS me,
                     collect(DISTINCT {chunk_id: r2.chunk_id, paper: p2.title, quote: r2.quote})[0..1] AS de
                WHERE size(mp) >= 2 OR size(dp) >= 2
                RETURN m.name AS method, d.name AS dataset, size(mp) AS method_papers, size(dp) AS dataset_papers, me, de
-               ORDER BY method_papers + dataset_papers DESC LIMIT 4""", read_only=True)
+               ORDER BY method_papers + dataset_papers DESC LIMIT 16""", read_only=True)
+        combos = [c for c in combos if valid_entity(c["method"]) and valid_entity(c["dataset"])][:4]
         for c in combos:
             gaps.append({
                 "type": "untested_combination",
@@ -282,9 +295,19 @@ class ResearchTools:
 
         if relevance:
             for g in gaps:
-                g["score"] = round(g["score"] * (0.4 + relevance(g["_text"])), 3)
+                g["relevance"] = round(relevance(g["_text"]), 3)
+                g["score"] = round(g["score"] * (0.4 + g["relevance"]), 3)
+            # Ranked, not filtered: short topics ("cold-start") embed poorly, so callers judge relevance.
+            # Investigations drop gaps not backed by a paper relevant to the question (investigation.py).
         for g in gaps:
-            g["score"] = min(1.0, g["score"])
+            # Quality signals: how many distinct papers back the gap, and whether its text is a concrete
+            # limitation rather than a generic sentence. Weak gaps are ranked down here and are not
+            # presented as research gaps by investigations (investigation.py / grounded.py).
+            g["support_papers"] = len({e.get("paper") for e in g["evidence"] if e.get("paper")})
+            g["specific"] = g["type"] not in LIMITATION_GAPS or is_specific_limitation(g["_text"])
+            if g["support_papers"] < 2 or not g["specific"]:
+                g["score"] = g["score"] * 0.5
+            g["score"] = min(1.0, round(g["score"], 3))
         gaps.sort(key=lambda g: g["score"], reverse=True)
         for i, g in enumerate(gaps[:max_gaps], start=1):
             g["id"] = f"G{i}"
@@ -316,6 +339,35 @@ class ResearchTools:
         for row in rows[:50]:
             clean.append({k: _plain(v) for k, v in row.items()})
         return {"rows": clean}
+
+
+LIMITATION_GAPS = {"recurring_limitation", "unaddressed_limitation", "open_future_work"}
+_LIMITATION_CUE = re.compile(
+    r"\b(not (be )?(evaluated|tested|considered|addressed|validated|explored|included|available|studied|examined|assessed)|"
+    r"did not|does not|do not|cannot|could not|limited to|limitation|only (on|with|for|in)|lacks?|lacking|restricted to|"
+    r"remains? (unclear|untested|open|unexplored|unknown)|future (work|research|studies)|further (work|research|study|studies)|"
+    r"should (be|investigate|explore|evaluate|examine)|requires?|small (sample|dataset)|bias(ed)?|ignores?|untested|unclear)\b", re.I)
+_BOILERPLATE = re.compile(r"\b(comprehensive review|valuable insights|this (review|paper|manuscript|study) (presents|offers|provides)|"
+                          r"helps to|prospects|in conclusion|state[- ]of[- ]the[- ]art)\b", re.I)
+_ENTITY_JUNK = {"the", "this", "that", "these", "those", "small", "large", "dataset", "data", "crop", "model", "method",
+                "challenges", "results", "table", "figure", "our", "their"}
+
+
+def is_specific_limitation(text: str) -> bool:
+    """A concrete limitation names what is missing (cue words) and is not review boilerplate."""
+    text = (text or "").strip()
+    return 30 <= len(text) <= 450 and bool(_LIMITATION_CUE.search(text)) and not _BOILERPLATE.search(text)
+
+
+def valid_entity(name: str) -> bool:
+    """Reject extraction noise such as "THE DATASET", "Crop", "Stavness This", "Challenges Small"."""
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9.+-]*", name or "")
+    if not words or len(words) > 5 or not 2 <= len(name.strip()) <= 50:
+        return False
+    lowered = [w.lower() for w in words]
+    if any(w in _ENTITY_JUNK for w in lowered):
+        return False
+    return True
 
 
 def _plain(value):

@@ -4,6 +4,8 @@ Schema
   (:Paper {id, title, authors, year, abstract, source_file, num_pages, sha256, extractor})
   (:Author {id, name})-[:AUTHORED]->(:Paper)
   (:Paper)-[:HAS_CHUNK]->(:Chunk {id, paper_id, page, section, text, embedding})
+  (:Paper)-[:HAS_PAGE]->(:Page {id, paper_id, number, text, chars})      full page text, browsable in FalkorDB
+  (:Chunk)-[:ON_PAGE]->(:Page)                                           STORE_PAGES_IN_GRAPH (default on)
   (:Paper)-[:USES_METHOD {chunk_id, quote}]->(:Method {id, name})          shared across papers
   (:Paper)-[:USES_DATASET {chunk_id, quote}]->(:Dataset {id, name})        shared across papers
   (:Paper)-[:MAKES_CLAIM]->(:Claim)  (:Paper)-[:REPORTS_FINDING]->(:Finding)
@@ -60,13 +62,15 @@ def statement_id(paper_id: str, label: str, text: str) -> str:
 
 
 class GraphStore:
-    def __init__(self, url: str | None = None, graph_name: str | None = None):
+    def __init__(self, url: str | None = None, graph_name: str | None = None, db: FalkorDB | None = None):
+        """`db`: an existing FalkorDB client to share (one connection pool for many project graphs)."""
         settings = get_settings()
         url = url or settings.falkordb_url
-        if not url:
+        if not url and db is None:
             raise GraphConnectionError("FALKORDB_URL is not set. Copy .env.example to .env and add your FalkorDB Cloud URL.")
+        self._owns_db = db is None
         try:
-            self.db = FalkorDB.from_url(url)
+            self.db = db or FalkorDB.from_url(url)
             self.graph = self.db.select_graph(graph_name or settings.graph_name)
             self.graph.query("RETURN 1")
         except AuthenticationError as e:
@@ -79,6 +83,8 @@ class GraphStore:
 
     # ------------------------------------------------------------------ basics
     def close(self) -> None:
+        if not self._owns_db:
+            return  # shared client: closed by its owner
         try:
             self.db.close()
         except Exception:
@@ -105,9 +111,10 @@ class GraphStore:
             except ResponseError as e:
                 if "already indexed" not in str(e).lower():
                     raise
-        for label in ("Paper", "Author", "Chunk", "Method", "Dataset", "Meta", *STATEMENT_LABELS):
+        for label in ("Paper", "Author", "Chunk", "Page", "Method", "Dataset", "Meta", *STATEMENT_LABELS):
             ignore_existing(self.graph.create_node_range_index, label, "id")
         ignore_existing(self.graph.create_node_range_index, "Chunk", "paper_id")
+        ignore_existing(self.graph.create_node_range_index, "Page", "paper_id")
         ignore_existing(self.graph.create_node_fulltext_index, "Chunk", "text")
         for label in ("Chunk", *STATEMENT_LABELS):
             ignore_existing(self.graph.create_node_vector_index, label, "embedding", dim=DIM, similarity_function="cosine")
@@ -132,7 +139,7 @@ class GraphStore:
 
     def delete_paper(self, paper_id: str) -> None:
         """Remove a paper and everything it owns; shared Method/Dataset/Author nodes are kept if still used."""
-        self.query("MATCH (p:Paper {id: $id})-[:HAS_CHUNK|MAKES_CLAIM|REPORTS_FINDING|HAS_LIMITATION]->(n) DETACH DELETE n", {"id": paper_id})
+        self.query("MATCH (p:Paper {id: $id})-[:HAS_CHUNK|HAS_PAGE|MAKES_CLAIM|REPORTS_FINDING|HAS_LIMITATION]->(n) DETACH DELETE n", {"id": paper_id})
         self.query("MATCH (p:Paper {id: $id}) DETACH DELETE p", {"id": paper_id})
         self.query("MATCH (n) WHERE (n:Method OR n:Dataset OR n:Author) AND NOT (n)--() DELETE n")
 
@@ -194,6 +201,20 @@ class GraphStore:
             {"pid": paper.id, "rows": [{"id": c.id, "page": c.page, "section": c.section, "text": c.text, "vec": v.tolist()}
                                        for c, v in zip(paper.chunks, chunk_vecs)]},
         )
+
+        # Full page text, so a paper can be read page by page directly in the FalkorDB browser
+        if get_settings().store_pages_in_graph and paper.pages:
+            self.query(
+                """MATCH (p:Paper {id: $pid}) UNWIND $rows AS r
+                   MERGE (pg:Page {id: r.id})
+                   SET pg.paper_id = $pid, pg.number = r.number, pg.text = r.text, pg.chars = r.chars
+                   MERGE (p)-[:HAS_PAGE]->(pg)""",
+                {"pid": paper.id, "rows": [{"id": f"{paper.id}:p{n:04d}", "number": n, "text": t, "chars": len(t)}
+                                           for n, t in enumerate(paper.pages, start=1)]},
+            )
+            self.query(
+                """MATCH (c:Chunk {paper_id: $pid}) MATCH (pg:Page {paper_id: $pid}) WHERE pg.number = c.page
+                   MERGE (c)-[:ON_PAGE]->(pg)""", {"pid": paper.id})
 
         # Shared entities
         for rel, label, items in (("USES_METHOD", "Method", extraction.methods), ("USES_DATASET", "Dataset", extraction.datasets)):
@@ -290,7 +311,7 @@ class GraphStore:
     # ------------------------------------------------------------------ reads
     def stats(self) -> dict:
         rows = self.query(
-            """MATCH (n) WHERE n:Paper OR n:Chunk OR n:Method OR n:Dataset OR n:Claim OR n:Finding OR n:Limitation OR n:Author
+            """MATCH (n) WHERE n:Paper OR n:Chunk OR n:Page OR n:Method OR n:Dataset OR n:Claim OR n:Finding OR n:Limitation OR n:Author
                RETURN labels(n)[0] AS label, count(n) AS total""", read_only=True)
         out = {r["label"]: r["total"] for r in rows}
         rel = self.query("MATCH ()-[r]->() RETURN count(r) AS n", read_only=True)

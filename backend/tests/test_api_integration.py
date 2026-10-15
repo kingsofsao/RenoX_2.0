@@ -39,6 +39,9 @@ def client():
     database.reset_store()
     mp.undo()
     store.graph.delete()
+    for g in store.db.list_graphs():  # the project registry created by the API
+        if g.startswith(API_GRAPH):
+            store.db.select_graph(g).delete()
     store.close()
 
 
