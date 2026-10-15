@@ -1,0 +1,25 @@
+# --- API ---------------------------------------------------------------------
+fastapi>=0.140
+uvicorn[standard]>=0.30
+python-multipart>=0.0.10
+
+# --- Graph database ----------------------------------------------------------
+falkordb>=1.8.0
+python-dotenv>=1.0.1
+
+# --- PDF ingestion -----------------------------------------------------------
+pdfplumber>=0.11.10
+
+# --- Semantic retrieval (vectors live in FalkorDB's native vector index) -----
+sentence-transformers>=6.1.0
+numpy>=2.0
+
+# --- Agent + MCP tools (next phase; already implemented in researchmind/) -----
+anthropic>=1.14.0
+mcp>=2.3.0
+
+# --- Tests and sample PDFs -----------------------------------------------------
+pytest>=8.0
+httpx>=0.27
+reportlab>=5.0.1
+pillow>=10.0

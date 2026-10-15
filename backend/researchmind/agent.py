@@ -1,0 +1,300 @@
+"""The investigation agent.
+
+Claude mode: Claude plans and calls the graph tools (search, traversal, claim comparison,
+gap finding) in a tool-use loop, then writes a cited report. It can only cite chunk ids
+returned by tools; citations are verified against the graph afterwards.
+
+Offline mode (no API key): a fixed investigation plan over the same tools, producing an
+extractive, fully cited report. Useful for demos without credentials and for tests.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+from typing import Callable
+
+import anthropic
+
+from .graph import GraphStore
+from .llm import get_llm
+from .report import InvestigationResult, collect_evidence, finalize_citations
+from .tools import TOOL_SPECS, ResearchTools, call_tool
+
+log = logging.getLogger(__name__)
+
+Event = dict
+MAX_TOOL_RESULT_CHARS = 12000
+
+SYSTEM_PROMPT = """You are ResearchMind, a scientific research investigator. You answer research questions by investigating a FalkorDB knowledge graph of ingested papers, never from memory.
+
+The graph links papers to methods, datasets, claims, findings and limitations, and every statement is tied to an evidence chunk (a page-level passage) with an id like p_1a2b3c4d5e6f:c003. Cross-paper edges mark similar statements, contradictions, and limitations that another paper addresses.
+
+How to investigate:
+- Start with list_papers, then gather evidence from several angles: search_evidence for passages, explore_entity to traverse from methods/datasets to the papers and results connected to them, compare_claims to find agreement and contradiction across papers, find_related_papers for multi-hop connections, and find_research_gaps for candidate gaps. Use graph_query only for questions the other tools cannot answer.
+- Investigate across multiple papers. Follow up on contradictions and limitations rather than stopping at the first relevant passage.
+- Stop investigating once additional tool calls stop changing your conclusions.
+
+How to write the final report (Markdown):
+- Sections: "## Answer" (direct answer in 2-4 sentences), "## Evidence" (the key results, grouped by theme, across papers), "## Agreements and Conflicts", "## Limitations of the Evidence", "## Candidate Research Gaps" (each gap: what is missing, why the evidence suggests it, and a concrete study that would close it), "## Confidence".
+- Cite every factual sentence with the evidence chunk id in square brackets, e.g. [p_1a2b3c4d5e6f:c003]. Cite only chunk ids that appeared in tool results. Several citations go in one bracket separated by commas.
+- Present gaps as candidates supported by the ingested papers only, not as established facts. If the corpus cannot answer the question, say so plainly.
+- Do not include a references list; it is generated automatically from your citations."""
+
+
+class Investigator:
+    def __init__(self, store: GraphStore, llm=None, use_llm: bool = True, max_turns: int = 14):
+        self.tools = ResearchTools(store)
+        self.store = store
+        self.llm = (llm or get_llm()) if use_llm else None
+        self.max_turns = max_turns
+        self.effort = os.getenv("AGENT_EFFORT", "high")
+
+    @property
+    def mode(self) -> str:
+        return "claude" if self.llm else "offline"
+
+    def run(self, question: str, on_event: Callable[[Event], None] = lambda e: None) -> InvestigationResult:
+        question = question.strip()
+        if not question:
+            raise ValueError("Question is empty.")
+        result = InvestigationResult(question=question, mode=self.mode)
+        if not self.store.list_papers():
+            result.report_markdown = "# Investigation\n\nNo papers have been ingested yet. Ingest PDFs first."
+            result.warnings.append("Knowledge graph is empty.")
+            return result
+        if self.llm:
+            try:
+                self._run_claude(question, result, on_event)
+            except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
+                result.warnings.append(f"Claude credentials rejected ({e.__class__.__name__}); ran offline investigation instead.")
+                on_event({"type": "status", "message": "Claude credentials rejected - switching to offline mode"})
+                result.mode = "offline"
+                self._run_offline(question, result, on_event)
+            except anthropic.APIError as e:
+                result.warnings.append(f"Claude API error ({e.__class__.__name__}: {e}); ran offline investigation instead.")
+                on_event({"type": "status", "message": f"Claude API error - switching to offline mode"})
+                result.mode = "offline"
+                self._run_offline(question, result, on_event)
+        else:
+            self._run_offline(question, result, on_event)
+
+        body, refs, warnings = finalize_citations(
+            result.report_markdown, result.evidence,
+            lookup=lambda ids: [row for i in range(0, len(ids), 20) for row in self.tools.get_evidence(ids[i:i + 20])["evidence"]])
+        result.report_markdown, result.references = body, refs
+        result.warnings += warnings
+        on_event({"type": "done", "message": f"Report ready with {len(refs)} cited sources"})
+        return result
+
+    # ------------------------------------------------------------------ helpers
+    def _call(self, name: str, args: dict, result: InvestigationResult, on_event) -> dict:
+        on_event({"type": "tool_call", "tool": name, "args": args})
+        try:
+            output = call_tool(self.tools, name, args)
+        except TypeError as e:
+            output = {"error": f"Invalid arguments for {name}: {e}"}
+        except Exception as e:
+            log.exception("Tool %s failed", name)
+            output = {"error": f"{name} failed: {e}"}
+        collect_evidence(output, result.evidence)
+        if name == "find_research_gaps" and isinstance(output, dict):
+            result.gaps = output.get("gaps", result.gaps)
+        summary = _summarize(name, output)
+        result.steps.append({"tool": name, "args": args, "summary": summary})
+        on_event({"type": "tool_result", "tool": name, "summary": summary})
+        return output
+
+    # ------------------------------------------------------------------ Claude loop
+    def _run_claude(self, question: str, result: InvestigationResult, on_event) -> None:
+        messages: list[dict] = [{"role": "user", "content": f"Research question: {question}"}]
+        on_event({"type": "status", "message": "Claude is planning the investigation"})
+        final_text = ""
+        for turn in range(self.max_turns + 1):
+            last_turn = turn == self.max_turns
+            if last_turn:
+                messages.append({"role": "user", "content": "Tool budget reached. Write the final report now using the evidence gathered."})
+            with_tools = {"tools": TOOL_SPECS} if not last_turn else {"tools": TOOL_SPECS, "tool_choice": {"type": "none"}}
+            response = self.llm.create(
+                max_tokens=16000, system=SYSTEM_PROMPT, messages=messages,
+                output_config={"effort": self.effort}, **with_tools)
+
+            if response.stop_reason == "refusal":
+                result.warnings.append("Claude declined this request; showing the offline investigation instead.")
+                result.mode = "offline"
+                self._run_offline(question, result, on_event)
+                return
+            messages.append({"role": "assistant", "content": response.content})
+            texts = [b.text for b in response.content if b.type == "text" and b.text.strip()]
+
+            if response.stop_reason == "pause_turn":
+                continue
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            if response.stop_reason == "tool_use" and tool_uses:
+                for t in texts:
+                    on_event({"type": "thought", "message": t})
+                results = []
+                for block in tool_uses:
+                    args = block.input if isinstance(block.input, dict) else {}
+                    output = self._call(block.name, args, result, on_event)
+                    payload = json.dumps(output, default=str)
+                    if len(payload) > MAX_TOOL_RESULT_CHARS:
+                        payload = payload[:MAX_TOOL_RESULT_CHARS] + "... [truncated; narrow the query for more]"
+                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": payload,
+                                    **({"is_error": True} if isinstance(output, dict) and "error" in output else {})})
+                messages.append({"role": "user", "content": results})
+                continue
+
+            final_text = "\n\n".join(texts)
+            if response.stop_reason == "max_tokens":
+                result.warnings.append("The report hit the output token limit and may be truncated.")
+            break
+
+        if not final_text.strip():
+            result.warnings.append("Claude returned no report text; showing the offline investigation instead.")
+            result.mode = "offline"
+            self._run_offline(question, result, on_event)
+            return
+        on_event({"type": "status", "message": "Verifying citations"})
+        result.report_markdown = f"# Investigation: {question}\n\n" + _strip_title(final_text)
+
+    # ------------------------------------------------------------------ offline plan
+    def _run_offline(self, question: str, result: InvestigationResult, on_event) -> None:
+        on_event({"type": "status", "message": "Running offline investigation plan (no LLM configured)"})
+        papers = self._call("list_papers", {}, result, on_event)["papers"]
+        evidence = self._call("search_evidence", {"query": question, "top_k": 8}, result, on_event)["results"]
+        comparison = self._call("compare_claims", {"topic": question, "top_k": 10}, result, on_event)
+
+        # Traverse from entities named in the question or the top evidence
+        entity_rows = self.store.query("MATCH (e) WHERE e:Method OR e:Dataset RETURN e.name AS name, labels(e)[0] AS label", read_only=True)
+        q_low = question.lower()
+        named = [r["name"] for r in entity_rows if r["name"].lower() in q_low]
+        if not named:
+            top_text = " ".join(e["text"].lower() for e in evidence[:3])
+            named = [r["name"] for r in entity_rows if r["label"] == "Method" and r["name"].lower() in top_text]
+        explored = [self._call("explore_entity", {"name": n}, result, on_event) for n in named[:2]]
+
+        top_papers = list(dict.fromkeys(e["paper_id"] for e in evidence))[:3]
+        details = [self._call("get_paper", {"paper_id": pid}, result, on_event) for pid in top_papers]
+        gaps = self._call("find_research_gaps", {"topic": question, "max_gaps": 6}, result, on_event)["gaps"]
+        on_event({"type": "status", "message": "Assembling extractive report"})
+        result.report_markdown = _offline_report(question, papers, evidence, comparison, explored, details, gaps)
+
+
+# ---------------------------------------------------------------------- formatting helpers
+
+def _strip_title(text: str) -> str:
+    return re.sub(r"^\s*#\s+[^\n]*\n+", "", text, count=1)
+
+
+def _summarize(name: str, output: dict) -> str:
+    if not isinstance(output, dict):
+        return "done"
+    if "error" in output:
+        return f"error: {output['error']}"
+    if name == "list_papers":
+        return f"{output.get('count', 0)} papers in the graph"
+    if name == "search_evidence":
+        res = output.get("results", [])
+        return f"{len(res)} passages from {len({r['paper_id'] for r in res})} papers"
+    if name == "compare_claims":
+        n = sum(len(v) for v in output.get("statements_by_paper", {}).values())
+        return f"{n} statements across {len(output.get('statements_by_paper', {}))} papers, {len(output.get('contradictions', []))} contradictions"
+    if name == "find_research_gaps":
+        return f"{len(output.get('gaps', []))} candidate gaps"
+    if name == "explore_entity":
+        return "; ".join(f"{m['type']} '{m['entity']}' used by {len(m['papers'])} papers" for m in output.get("matches", []))
+    if name == "get_paper":
+        return f"'{output.get('title', '')}': {len(output.get('findings', []))} findings, {len(output.get('limitations', []))} limitations"
+    if name == "find_related_papers":
+        return f"{len(output.get('shared_entities', []))} papers share entities, {len(output.get('statement_links', []))} statement links"
+    if name == "graph_query":
+        return f"{len(output.get('rows', []))} rows"
+    if name == "get_evidence":
+        return f"{len(output.get('evidence', []))} passages"
+    return "done"
+
+
+def _cite(chunk_id: str) -> str:
+    return f"[{chunk_id}]"
+
+
+def _offline_report(question, papers, evidence, comparison, explored, details, gaps) -> str:
+    lines = [f"# Investigation: {question}", "",
+             "> Generated in **offline mode** (no LLM configured): an extractive synthesis of graph evidence. "
+             "Add `ANTHROPIC_API_KEY` to `.env` for Claude-driven investigation and narrative reports.", ""]
+
+    lines += ["## Answer", ""]
+    by_paper = comparison.get("statements_by_paper", {})
+    key = sorted((s for stmts in by_paper.values() for s in stmts), key=lambda s: -s["relevance"])[:4]
+    if key:
+        lines.append(f"The {len(papers)} ingested papers contain {sum(len(v) for v in by_paper.values())} claims/findings relevant to this question. The most relevant:")
+        lines.append("")
+        for s in key:
+            lines.append(f"- {s['text']} {_cite(s['chunk_id'])} — *{s['paper_title']}*")
+    else:
+        lines.append("The ingested papers contain little direct evidence on this question.")
+    lines.append("")
+
+    lines += ["## Evidence", ""]
+    for paper_title, stmts in by_paper.items():
+        lines.append(f"**{paper_title}**")
+        for s in stmts[:4]:
+            lines.append(f"- ({s['type']}) {s['text']} {_cite(s['chunk_id'])}")
+        lines.append("")
+    if evidence:
+        lines.append("Most relevant passages:")
+        lines.append("")
+        for e in evidence[:4]:
+            snippet = e["text"][:260] + ("…" if len(e["text"]) > 260 else "")
+            lines.append(f"- *{e['paper_title']}*, p. {e['page']} ({e['section']}): \"{snippet}\" {_cite(e['chunk_id'])}")
+        lines.append("")
+
+    for ex in explored:
+        for m in ex.get("matches", []):
+            lines.append(f"**Graph traversal — {m['type']}: {m['entity']}** (used by {len(m['papers'])} papers)")
+            for p in m["papers"]:
+                companions = p.get("datasets") or p.get("methods") or []
+                extra = f"; also uses {', '.join(companions)}" if companions else ""
+                lines.append(f"- *{p['title']}*{extra} {_cite(p['chunk_id'])}")
+            lines.append("")
+
+    lines += ["## Agreements and Conflicts", ""]
+    contradictions, related = comparison.get("contradictions", []), comparison.get("related_statements", [])
+    if not contradictions and not related:
+        lines.append("No cross-paper contradictions or closely related statements were detected for this topic.")
+    for c in contradictions[:4]:
+        lines.append(f"- **Conflict** ({c['score']:.2f}): *{c['paper_a']}* states \"{c['statement_a']}\" {_cite(c['chunk_a'])}, "
+                     f"while *{c['paper_b']}* states \"{c['statement_b']}\" {_cite(c['chunk_b'])}.")
+    for a in related[:3]:
+        lines.append(f"- **Closely related** ({a['score']:.2f}): \"{a['statement_a']}\" {_cite(a['chunk_a'])} ~ \"{a['statement_b']}\" {_cite(a['chunk_b'])}")
+    lines.append("")
+
+    lines += ["## Limitations of the Evidence", ""]
+    any_lim = False
+    for d in details:
+        for l in d.get("limitations", [])[:3]:
+            any_lim = True
+            tag = "future work" if l.get("kind") == "future_work" else "limitation"
+            lines.append(f"- *{d['title']}* ({tag}): {l['text']} {_cite(l['chunk_id'])}")
+    if not any_lim:
+        lines.append("- No limitations were extracted for the most relevant papers.")
+    lines.append(f"- Conclusions are limited to the {len(papers)} ingested papers.")
+    lines.append("")
+
+    lines += ["## Candidate Research Gaps", "",
+              "_Hypotheses derived from the ingested papers only — verify against the wider literature._", ""]
+    if not gaps:
+        lines.append("No candidate gaps were found.")
+    for g in gaps:
+        cites = ", ".join(dict.fromkeys(e["chunk_id"] for e in g["evidence"] if e.get("chunk_id")))
+        lines.append(f"**{g['id']}. {g['title']}** — `{g['type'].replace('_', ' ')}`, score {g['score']}")
+        lines.append(f"- Why: {g['rationale']} [{cites}]")
+        lines.append("")
+
+    lines += ["## Confidence", "",
+              "Moderate at best: offline mode ranks evidence by semantic similarity and graph structure but does not reason over it. "
+              "Treat the synthesis as a structured evidence brief.", ""]
+    return "\n".join(lines)

@@ -1,0 +1,19 @@
+# Secrets
+.env
+*.env.local
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Runtime data (uploads, page text, extraction dumps, reports)
+data/uploads/
+data/documents/
+data/processed/
+data/reports/
