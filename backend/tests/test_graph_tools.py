@@ -1,4 +1,4 @@
-"""Graph writes, idempotency and research tools (requires FalkorDB)."""
+"""Graph writes, idempotency, paper isolation and research tools (requires FalkorDB)."""
 
 from researchmind.pipeline import ingest_file
 from researchmind.tools import ResearchTools
@@ -9,7 +9,28 @@ def test_ingest_counts(ingested, store):
     stats = store.stats()
     assert stats["Paper"] == 3
     assert stats["Chunk"] == sum(r["chunks"] for r in ingested)
-    assert stats["Method"] >= 5 and stats["Dataset"] == 4  # DAVIS, KIBA, BindingDB, PDBbind are shared nodes
+    assert stats["Method"] >= 5 and stats["Dataset"] >= 4
+
+
+def test_every_node_belongs_to_exactly_one_paper(ingested, store):
+    """Methods, datasets and authors are per paper: no node is shared between two papers."""
+    shared = store.query("""MATCH (p:Paper)-->(e) WHERE e:Method OR e:Dataset OR e:Author OR e:Chunk OR e:Page
+                               OR e:Claim OR e:Finding OR e:Limitation
+                            WITH e, count(DISTINCT p) AS owners WHERE owners > 1 RETURN count(e) AS n""")
+    assert shared[0]["n"] == 0
+    unowned = store.query("""MATCH (e) WHERE (e:Method OR e:Dataset OR e:Author) AND e.paper_id IS NULL
+                             RETURN count(e) AS n""")
+    assert unowned[0]["n"] == 0
+
+
+def test_no_edges_between_papers(ingested, store):
+    rows = store.query("""MATCH (a)-[r]-(b) WHERE a.paper_id IS NOT NULL AND b.paper_id IS NOT NULL
+                            AND a.paper_id <> b.paper_id RETURN count(r) AS n""")
+    assert rows[0]["n"] == 0
+    rows = store.query("""MATCH (p:Paper)-[r]-(n) WHERE n.paper_id IS NOT NULL AND n.paper_id <> p.id
+                          RETURN count(r) AS n""")
+    assert rows[0]["n"] == 0
+    assert store.query("MATCH ()-[r:CONTRADICTS|SIMILAR_TO|ADDRESSED_BY]->() RETURN count(r) AS n")[0]["n"] == 0
 
 
 def test_reingest_is_idempotent(ingested, store, sample_pdfs):
@@ -29,46 +50,47 @@ def test_evidence_links_point_to_pages(ingested, store):
     assert orphans[0]["n"] == 0
 
 
-def test_contradiction_detected(ingested, store):
-    rows = store.query("MATCH (a)-[:CONTRADICTS]->(b) RETURN a.text AS a, b.text AS b")
-    texts = " ".join(r["a"] + " " + r["b"] for r in rows).lower()
-    assert "do not generalize" in texts and "generalize well" in texts
-
-
 def test_search_evidence(ingested, store):
     res = ResearchTools(store).search_evidence("cold-start performance on unseen proteins", top_k=3)["results"]
     assert res and all(r["chunk_id"] and r["page"] >= 1 for r in res)
     assert any("Protein Language Models" in r["paper_title"] for r in res)
 
 
-def test_explore_entity_multi_hop(ingested, store):
-    out = ResearchTools(store).explore_entity("GAT")
-    match = out["matches"][0]
-    assert match["entity"] == "Graph Attention Network"
-    assert len(match["papers"]) == 3
-    assert match["limitations_of_papers_using_it"]
+def test_explore_entity_stays_inside_one_paper(ingested, store):
+    tools = ResearchTools(store)
+    for p in tools.list_papers()["papers"]:
+        scoped = ResearchTools(store, paper_ids=[p["id"]])
+        out = scoped.explore_entity("Graph Attention Network")
+        if "error" in out:
+            continue
+        for match in out["matches"]:
+            assert [x["paper_id"] for x in match["papers"]] == [p["id"]]
+            assert all(lim["chunk_id"].startswith(p["id"] + ":") for lim in match["limitations_of_papers_using_it"])
+    gat = tools.explore_entity("GAT")["matches"]
+    assert gat and all(m["entity"] == "Graph Attention Network" and len(m["papers"]) == 1 for m in gat)
 
 
-def test_related_papers_excludes_self(ingested, store):
+def test_related_papers_finds_nothing_across_papers(ingested, store):
     tools = ResearchTools(store)
     pid = tools.list_papers()["papers"][0]["id"]
     related = tools.find_related_papers(pid)
-    assert related["shared_entities"]
-    assert all(r["paper_id"] != pid for r in related["shared_entities"])
+    assert related["shared_entities"] == [] and related["statement_links"] == []
 
 
-def test_compare_claims(ingested, store):
-    out = ResearchTools(store).compare_claims("do graph models generalize to unseen proteins")
-    assert len(out["statements_by_paper"]) >= 2
-    assert out["contradictions"]
+def test_compare_claims_within_a_paper(ingested, store):
+    tools = ResearchTools(store)
+    pid = next(p["id"] for p in tools.list_papers()["papers"] if "Graph Attention" in (p["title"] or ""))
+    out = ResearchTools(store, paper_ids=[pid]).compare_claims("do graph models generalize to unseen proteins")
+    assert list(out["statements_by_paper"]) and all(s["paper_id"] == pid for v in out["statements_by_paper"].values() for s in v)
+    assert out["contradictions"] == []
 
 
-def test_research_gaps_have_evidence(ingested, store):
-    gaps = ResearchTools(store).find_research_gaps("cold-start")["gaps"]
-    types = {g["type"] for g in gaps}
-    assert "conflicting_evidence" in types
-    assert types & {"recurring_limitation", "unaddressed_limitation"}
-    assert all(g["evidence"] and 0 < g["score"] <= 1 for g in gaps)
+def test_research_gaps_come_from_the_papers_own_limitations(ingested, store):
+    tools = ResearchTools(store)
+    for p in tools.list_papers()["papers"]:
+        gaps = ResearchTools(store, paper_ids=[p["id"]]).find_research_gaps("cold-start")["gaps"]
+        assert all(g["evidence"] and 0 < g["score"] <= 1 for g in gaps)
+        assert all(e["chunk_id"].startswith(p["id"] + ":") for g in gaps for e in g["evidence"])
 
 
 def test_graph_query_is_read_only(ingested, store):
@@ -77,6 +99,7 @@ def test_graph_query_is_read_only(ingested, store):
     assert "error" in tools.graph_query("CREATE (:Paper {id: 'x'})")
     rows = tools.graph_query("MATCH (p:Paper) RETURN p.title AS title")["rows"]
     assert len(rows) == 3
+    assert "error" in ResearchTools(store, paper_ids=[tools.list_papers()["papers"][0]["id"]]).graph_query("MATCH (p) RETURN p")
 
 
 def test_pages_are_stored_and_linked(ingested, store):

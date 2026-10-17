@@ -11,12 +11,12 @@ from types import SimpleNamespace
 import anthropic
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app import database
 from app.main import app
 from app.services import investigation_service
 from app.services.investigation_service import InvestigationManager
+from authclient import sign_up
 from fakes import CHUNKS, P1, P2, FakeStore, FakeTools
 from researchmind.agent import Investigator
 from researchmind.investigation import build_structured
@@ -242,130 +242,175 @@ def test_time_budget_forces_report():
 # ---------------------------------------------------------------------- FastAPI endpoint
 
 def make_factory(tools_factory=FakeTools, llm=None):
-    def factory(store, use_llm=True, time_budget_s=None):
-        return Investigator(store, llm=llm, use_llm=use_llm and llm is not None, tools=tools_factory(), time_budget_s=time_budget_s)
+    def factory(store, use_llm=True, time_budget_s=None, **kw):
+        return Investigator(store, llm=llm, use_llm=use_llm and llm is not None, tools=tools_factory(),
+                            time_budget_s=time_budget_s, require_llm=kw.get("require_llm", False))
     return factory
 
 
 @pytest.fixture
 def api(monkeypatch):
-    """TestClient with a fake store and a fresh manager; returns (client, set_manager)."""
+    """Signed-in client with a fake store and a fresh manager; returns (client, state, investigations url)."""
     database.reset_store()
     state = {"store": FakeStore(), "manager": InvestigationManager(2, 30, investigator_factory=make_factory())}
     app.dependency_overrides[database.get_store] = lambda: state["store"]
     app.dependency_overrides[investigation_service.get_manager] = lambda: state["manager"]
-    yield TestClient(app), state
-    app.dependency_overrides.clear()
+    client, _, pid = sign_up()
+    yield client, state, f"/api/projects/{pid}/investigations"
+    app.dependency_overrides.pop(database.get_store, None)
+    app.dependency_overrides.pop(investigation_service.get_manager, None)
     database.reset_store()
 
 
+ASK = {"question": QUESTION, "paper_id": P1, "wait": True}
+
+
 def test_api_investigation_wait(api):
-    client, _ = api
-    r = client.post("/api/investigations", json={"question": QUESTION})
+    client, _, url = api
+    r = client.post(url, json=ASK)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "completed" and body["mode"] == "offline" and body["id"].startswith("inv_")
+    assert body["paper_ids"] == [P1] and body["language"] == "en"
     res = body["result"]
     for key in ("summary", "findings", "comparisons", "gaps", "limitations", "confidence", "sources", "papers", "report_markdown"):
         assert res[key], key
-    assert {s["paper_id"] for s in res["sources"]} <= {P1, P2, "p_ccccccccccc3"}
     assert all(s["chunk_id"] in CHUNKS and s["page"] for s in res["sources"])
     assert any(e["type"] == "tool_call" for e in body["progress"]) and body["progress"][-1]["type"] == "done"
     assert body["duration_seconds"] is not None
 
 
 def test_api_investigation_async_poll(api):
-    client, _ = api
-    r = client.post("/api/investigations", json={"question": QUESTION, "wait": False})
+    client, _, url = api
+    r = client.post(url, json={**ASK, "wait": False})
     assert r.status_code == 202 and r.json()["status"] in {"queued", "running"}
     inv_id = r.json()["id"]
     for _ in range(100):
-        body = client.get(f"/api/investigations/{inv_id}").json()
+        body = client.get(f"{url}/{inv_id}").json()
         if body["status"] in {"completed", "failed"}:
             break
         time.sleep(0.05)
     assert body["status"] == "completed" and body["result"]["gaps"]
-    listed = client.get("/api/investigations").json()["investigations"]
-    assert listed[0]["id"] == inv_id
+    listed = client.get(url).json()["investigations"]
+    assert listed[0]["id"] == inv_id and listed[0]["paper_title"]
 
 
 @pytest.mark.parametrize("payload, where", [
-    ({}, "question"), ({"question": "short"}, "question"), ({"question": "x" * 1001}, "question"),
-    ({"question": QUESTION, "wait": "maybe"}, "wait"),
+    ({"paper_id": P1}, "question"), ({"question": "short", "paper_id": P1}, "question"),
+    ({"question": "x" * 1001, "paper_id": P1}, "question"),
+    ({"question": QUESTION, "paper_id": P1, "wait": "maybe"}, "wait"),
+    ({"question": QUESTION}, "paper_id"), ({"question": QUESTION, "paper_id": "../etc"}, "paper_id"),
+    ({"question": QUESTION, "paper_id": P1, "language": "xx"}, "language"),
 ])
 def test_api_validates_input(api, payload, where):
-    client, _ = api
-    r = client.post("/api/investigations", json=payload)
+    client, _, url = api
+    r = client.post(url, json=payload)
     assert r.status_code == 422 and r.json()["error"]["code"] == "validation_error"
     assert where in r.json()["error"]["message"]
 
 
-def test_api_rejects_empty_corpus(api):
-    client, state = api
+def test_api_rejects_unknown_paper(api):
+    client, state, url = api
     state["store"] = FakeStore(papers=False)
-    r = client.post("/api/investigations", json={"question": QUESTION})
-    assert r.status_code == 409 and r.json()["error"]["code"] == "no_papers"
+    r = client.post(url, json=ASK)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "paper_not_found"
 
 
 def test_api_without_database(monkeypatch):
     database.reset_store()
+    client, _, pid = sign_up()
     monkeypatch.setenv("FALKORDB_URL", "falkor://default:SuperSecret123@localhost:1")
-    r = TestClient(app).post("/api/investigations", json={"question": QUESTION})
+    r = client.post(f"/api/projects/{pid}/investigations", json=ASK)
     assert r.status_code == 503 and r.json()["error"]["code"] == "database_unavailable"
     assert "SuperSecret123" not in r.text
     database.reset_store()
 
 
 def test_api_internal_failure_hides_details(api):
-    client, state = api
+    client, state, url = api
 
     def broken(store, **kw):
         raise RuntimeError("secret internal detail sk-ant-123")
     state["manager"] = InvestigationManager(1, 30, investigator_factory=broken)
-    r = client.post("/api/investigations", json={"question": QUESTION})
+    r = client.post(url, json=ASK)
     assert r.status_code == 500 and r.json()["error"]["code"] == "investigation_failed"
     assert "secret" not in r.text and "sk-ant" not in r.text and "Traceback" not in r.text
 
 
 def test_api_database_drop_during_investigation(api):
     from redis.exceptions import ConnectionError as RedisConnectionError
-    client, state = api
+    client, state, url = api
 
     class DroppingTools(FakeTools):
         def get_evidence(self, chunk_ids):
             raise RedisConnectionError("connection reset")
     state["manager"] = InvestigationManager(1, 30, investigator_factory=make_factory(DroppingTools))
-    r = client.post("/api/investigations", json={"question": QUESTION})
+    r = client.post(url, json=ASK)
     assert r.status_code == 503 and r.json()["error"]["code"] == "database_unavailable"
 
 
-def test_api_limits_concurrency(api):
-    client, state = api
+class SlowTools(FakeTools):
+    def list_papers(self):
+        time.sleep(0.5)
+        return super().list_papers()
 
-    class SlowTools(FakeTools):
-        def list_papers(self):
-            time.sleep(0.5)
-            return super().list_papers()
-    state["manager"] = InvestigationManager(1, 30, investigator_factory=make_factory(SlowTools))
-    first = client.post("/api/investigations", json={"question": QUESTION, "wait": False})
-    second = client.post("/api/investigations", json={"question": QUESTION, "wait": False})
+
+def test_api_limits_concurrency_per_user(api):
+    client, state, url = api
+    state["manager"] = InvestigationManager(3, 30, investigator_factory=make_factory(SlowTools))
+    first = client.post(url, json={**ASK, "wait": False})
+    second = client.post(url, json={**ASK, "wait": False})
     assert first.status_code == 202
     assert second.status_code == 429 and second.json()["error"]["code"] == "busy"
+    # another account is not blocked by this user's running investigation
+    other, _, other_pid = sign_up(email="grace@example.org", name="Grace Hopper")
+    assert other.post(f"/api/projects/{other_pid}/investigations", json={**ASK, "wait": False}).status_code == 202
 
 
 def test_api_unknown_and_malformed_ids(api):
-    client, _ = api
-    assert client.get("/api/investigations/inv_000000000000").status_code == 404
-    assert client.get("/api/investigations/not-an-id").status_code == 422
+    client, _, url = api
+    assert client.get(f"{url}/inv_000000000000").status_code == 404
+    assert client.get(f"{url}/not-an-id").status_code == 422
 
 
 def test_api_with_mocked_llm(api):
-    client, state = api
+    client, state, url = api
     state["manager"] = InvestigationManager(1, 30, investigator_factory=make_factory(llm=scripted_claude(f"{P1}:c004")))
-    body = client.post("/api/investigations", json={"question": QUESTION}).json()
+    body = client.post(url, json=ASK).json()
     assert body["status"] == "completed" and body["mode"] == "llm"
     assert body["result"]["summary"].startswith("Evidence is mixed")
     assert any("unverified" in w or "does not match" in w for w in body["result"]["warnings"])
+
+
+def _ai_required(monkeypatch):
+    from dataclasses import replace
+    from app.config import get_api_settings
+    strict = replace(get_api_settings(), ai_required=True)
+    monkeypatch.setattr(investigation_service, "get_api_settings", lambda: strict)
+
+
+def test_api_refuses_to_start_without_ai(api, monkeypatch):
+    client, _, url = api
+    _ai_required(monkeypatch)
+    r = client.post(url, json=ASK)
+    assert r.status_code == 503 and r.json()["error"]["code"] == "ai_unavailable"
+
+
+def test_api_ai_failure_fails_instead_of_offline_fallback(api, monkeypatch):
+    client, state, url = api
+    _ai_required(monkeypatch)
+    monkeypatch.setattr(investigation_service, "get_settings",
+                        lambda: SimpleNamespace(has_llm=True, resolved_provider="anthropic", llm_model="m", anthropic_model="m"))
+
+    class Down:
+        provider, model = "anthropic", "m"
+
+        def create(self, **kw):
+            raise anthropic.APIConnectionError(request=httpx.Request("POST", "https://internal.example/v1"))
+    state["manager"] = InvestigationManager(1, 30, investigator_factory=make_factory(llm=Down()))
+    r = client.post(url, json=ASK)
+    assert r.status_code == 503 and r.json()["error"]["code"] == "ai_unavailable"
+    assert "internal.example" not in r.text and "offline" not in r.text.lower()
 
 
 # ---------------------------------------------------------------------- relevance: off-topic questions

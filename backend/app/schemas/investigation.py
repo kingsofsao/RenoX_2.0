@@ -6,20 +6,27 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from researchmind.accounts import LANGUAGES
+
 MIN_QUESTION_CHARS = 10
 MAX_QUESTION_CHARS = 1000
 MAX_REQUIREMENTS_CHARS = 3000
+PAPER_ID_PATTERN = r"^p_[0-9a-f]{12}$"
 
 InvestigationStatus = Literal["queued", "running", "completed", "failed"]
+Language = Literal[tuple(LANGUAGES)]  # type: ignore[valid-type]
 
 
 class InvestigationRequest(BaseModel):
     question: str = Field(..., description="The research question to investigate.")
-    wait: bool = Field(True, description="true: respond when the investigation finishes (up to the time limit). "
-                                         "false: respond immediately (202) and poll GET /api/investigations/{id}.")
-    use_llm: bool = Field(True, description="Use the configured LLM if available; false forces the offline plan.")
+    paper_id: str = Field(..., pattern=PAPER_ID_PATTERN,
+                          description="The one paper to analyse. Each investigation reads exactly one paper; "
+                                      "no other paper of the account is consulted.")
+    wait: bool = Field(False, description="false: respond immediately (202) and poll GET .../investigations/{id}. "
+                                          "true: respond when the investigation finishes (up to the time limit).")
     requirements: str | None = Field(None, description="Optional user-provided project requirements or context. "
                                                         "Treated as [R], never as published evidence.")
+    language: Language | None = Field(None, description="Language of the report; defaults to the account's language.")
 
     @field_validator("requirements")
     @classmethod
@@ -191,6 +198,9 @@ class InvestigationResponse(BaseModel):
     provider: str | None = Field(None, description="LLM provider used (ollama, anthropic) when mode is llm.")
     model: str | None = None
     requirements: str | None = None
+    paper_ids: list[str] | None = Field(None, description="The paper the investigation analysed (one id).")
+    paper_title: str | None = None
+    language: str | None = None
     created_at: str
     started_at: str | None
     finished_at: str | None
@@ -208,6 +218,7 @@ class InvestigationSummary(BaseModel):
     provider: str | None = None
     model: str | None = None
     mode: Literal["llm", "offline"] | None
+    paper_title: str | None = None
     created_at: str
     duration_seconds: float | None
 

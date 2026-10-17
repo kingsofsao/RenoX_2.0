@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 SOURCE_CHARS = 420           # per-source excerpt length in the prompt
 MAX_SOURCES = 16
 
-SYSTEM = """You are ResearchMind, a careful research analyst. You answer ONLY from the numbered sources provided, which are excerpts of the user's ingested papers. You never use outside knowledge about these papers, products or systems.
+SYSTEM = """You are ResearchMind, a careful research analyst. You answer ONLY from the numbered sources provided, which are excerpts of ONE paper the user uploaded. You never use outside knowledge about this paper, other papers, products or systems, and you never compare it with papers that were not provided.
 
 Rules:
 1. End every factual sentence about the papers with its source number(s) in square brackets, e.g. [S2] or [S1, S4]. Only use source numbers that appear in the list.
@@ -47,12 +47,12 @@ Rules:
 FORMAT = """Write the report in Markdown with exactly these sections:
 ## Answer
 (2-4 sentences that directly answer the question, with citations)
-## Evidence from the papers
-(one short bullet list per paper, headed by the paper title; only facts from that paper, with citations)
-## Comparison
-(how the papers compare with each other{req_hint}; state agreements and differences, with citations)
+## Evidence from the paper
+(a short bullet list of the facts from the paper that answer the question, with citations)
+## Methods, data and results
+(the methods, datasets and results the paper reports that matter for the question{req_hint}, with citations)
 ## Conflicts and uncertainty
-(conflicting results between papers, or "No conflicts found in the sources.")
+(caveats, inconsistencies or uncertain results within the paper, or "No conflicts found in the sources.")
 ## Candidate research gaps
 (each line starts with "Hypothesis:" and cites supporting sources; only gaps the sources support)
 ## Not covered by the evidence
@@ -146,6 +146,10 @@ class GroundedInvestigation:
         compare = call("compare_claims", {"topic": question, "top_k": 10})
         statements = [s for v in compare.get("statements_by_paper", {}).values() for s in v
                       if (s.get("relevance") or 0) >= MIN_RELEVANCE]
+        single = self.inv.scope[0] if self.inv.scope and len(self.inv.scope) == 1 else None
+        if single:  # defence in depth: the tools are already scoped, but nothing of another paper may reach the model
+            hits = [h for h in hits if h.get("paper_id") == single]
+            statements = [s for s in statements if s.get("paper_id") == single]
         relevant_hits = sorted((h for h in hits if (h.get("score") or 0) >= MIN_RELEVANCE), key=lambda h: -h["score"])
 
         # Statements first (precise), then passages (context).
@@ -155,11 +159,22 @@ class GroundedInvestigation:
             pack.add(h["chunk_id"], h["paper_title"], h["page"], f"passage, {h.get('section') or 'text'}", h["text"])
 
         relevant_papers = list(dict.fromkeys([s["paper_id"] for s in statements] + [h["paper_id"] for h in relevant_hits]))
+        if single:
+            # The user chose this one paper, so its content is in scope by definition: broad questions
+            # ("what are the limitations?") match no single passage closely, yet the paper answers them.
+            relevant_papers = [single]
+            if not relevant_hits:
+                for h in sorted(hits, key=lambda h: -(h.get("score") or 0))[:5]:
+                    pack.add(h["chunk_id"], h["paper_title"], h["page"], f"passage, {h.get('section') or 'text'}", h["text"])
         for pid in relevant_papers[:3]:
             paper = call("get_paper", {"paper_id": pid})
-            for lim in paper.get("limitations", [])[:3]:
+            for lim in paper.get("limitations", [])[:6 if single else 3]:
                 pack.add(lim["chunk_id"], paper.get("title"), lim["page"],
                          "future work" if lim.get("kind") == "future_work" else "limitation", lim["text"])
+            if single:  # the paper's own claims and findings, so the model always sees what the paper reports
+                for key, kind in (("findings", "finding"), ("claims", "claim")):
+                    for st in paper.get(key, [])[:4]:
+                        pack.add(st["chunk_id"], paper.get("title"), st["page"], kind, st["text"])
 
         conflicts = []
         for c in compare.get("contradictions", []):
@@ -168,12 +183,14 @@ class GroundedInvestigation:
                 conflicts.append(f"- {a} and {b} report opposing results (similarity {c['score']:.2f}).")
 
         gap_hints = []
+        # A gap normally needs two papers behind it; an investigation of one selected paper uses that paper's own.
+        min_gap_papers = 1 if self.inv.scope and len(self.inv.scope) == 1 else 2
         if relevant_papers:
             gaps = call("find_research_gaps", {"topic": question, "max_gaps": 6}).get("gaps", [])
             for g in gaps:
                 ev = [e for e in g.get("evidence", []) if (e.get("chunk_id") or "").split(":")[0] in relevant_papers]
-                # Only concrete gaps backed by at least two relevant papers are offered to the model.
-                if g.get("specific") is False or len({(e.get("chunk_id") or "").split(":")[0] for e in ev}) < 2:
+                # Only concrete gaps backed by enough relevant papers are offered to the model.
+                if g.get("specific") is False or len({(e.get("chunk_id") or "").split(":")[0] for e in ev}) < min_gap_papers:
                     continue
                 sids = [pack.add(e["chunk_id"], e.get("paper"), e.get("page"), "gap evidence", e.get("quote")) for e in ev]
                 sids = [x for x in dict.fromkeys(sids) if x]
@@ -183,15 +200,15 @@ class GroundedInvestigation:
 
     # ------------------------------------------------------------------ prompting
     def _prompt(self, question: str, pack: EvidencePack, conflicts: list[str], gap_hints: list[str]) -> str:
-        parts = [f"RESEARCH QUESTION:\n{question}"]
+        parts = [f"RESEARCH QUESTION:\n{question}{self.inv.scope_note()}"]
         if self.requirements:
             parts.append(f"USER-PROVIDED PROJECT REQUIREMENTS [R] (not from the papers):\n{self.requirements[:1500]}")
         parts.append("SOURCES (excerpts from the ingested papers):\n" + pack.render(self.max_chars))
         parts.append("CONFLICTS DETECTED IN THE KNOWLEDGE GRAPH:\n" + ("\n".join(conflicts) if conflicts else "- none"))
         parts.append("CANDIDATE GAPS DETECTED IN THE KNOWLEDGE GRAPH (verify against the sources before using):\n"
                      + ("\n".join(gap_hints) if gap_hints else "- none"))
-        req_hint = " and with the user's requirements [R]" if self.requirements else ""
-        parts.append(FORMAT.format(req_hint=req_hint))
+        req_hint = " and how they relate to the user's requirements [R]" if self.requirements else ""
+        parts.append(FORMAT.format(req_hint=req_hint) + self.inv.language_note())
         return "\n\n".join(parts)
 
     def run(self, question: str, result: InvestigationResult, on_event) -> None:
@@ -200,7 +217,7 @@ class GroundedInvestigation:
         if not pack.sources:
             raise NoRelevantEvidence()
 
-        messages = [{"role": "system", "content": SYSTEM.format(rounds=self.max_rounds)},
+        messages = [{"role": "system", "content": SYSTEM.format(rounds=self.max_rounds) + self.inv.language_rule()},
                     {"role": "user", "content": self._prompt(question, pack, conflicts, gap_hints)}]
         model = getattr(self.llm, "model", "model")
         text, rounds = "", 0

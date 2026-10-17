@@ -1,20 +1,21 @@
-"""INTEGRATION: project isolation, saved investigations and evidence quality on a real FalkorDB.
+"""INTEGRATION: account and paper isolation, saved investigations and evidence quality on a real FalkorDB.
 
-Two projects with deliberately unrelated papers:
-  A = three synthetic drug-target papers      B = two synthetic urban-beekeeping papers
-Questions in one project must never retrieve the other's evidence - via the API, the MCP tools,
-vector search or free-form Cypher. Writes only to throwaway graphs `researchmind_pytest_proj*`,
-which are deleted afterwards. No LLM is used (offline plan); see test_ollama_live.py for real models.
+Two accounts with deliberately unrelated papers:
+  Alice = three synthetic drug-target papers      Bob = two synthetic urban-beekeeping papers
+Neither account can reach the other's projects, papers or investigations, and an investigation of
+one paper never retrieves evidence of any other paper - via the API, the MCP tools, vector search
+or Cypher. Writes only to throwaway graphs `researchmind_pytest_proj*`, deleted afterwards.
+No LLM is used (offline plan); see test_ollama_live.py for real models.
 """
 
 import os
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app import database
 from app.main import app
 from app.services import investigation_service
+from authclient import Client, sign_up
 from researchmind.config import get_settings
 from researchmind.mcp_bridge import MCPToolClient
 from researchmind.tools import ResearchTools
@@ -50,143 +51,154 @@ def env(sample_pdfs, tmp_path_factory):
     database.reset_store()
     investigation_service._manager = None
     bees = make_bee_pdfs(tmp_path_factory.mktemp("bees"))
-    with TestClient(app) as client:
-        a = client.post("/api/projects", json={"name": "Drug targets"}).json()
-        b = client.post("/api/projects", json={"name": "Urban bees"}).json()
-        for pid, pdfs in ((a["id"], sample_pdfs), (b["id"], bees)):
+    with Client(app) as alice, Client(app) as bob:
+        for c in (alice, bob):
+            c.get("/api/auth/csrf")
+        _, _, a = sign_up(alice, email="alice@example.org", name="Alice Ball")
+        _, _, b = sign_up(bob, email="bob@example.org", name="Bob Kahn")
+        for client, pid, pdfs in ((alice, a, sample_pdfs), (bob, b, bees)):
             files = [("files", (p.name, p.read_bytes(), "application/pdf")) for p in pdfs]
             r = client.post(f"/api/projects/{pid}/papers/upload", files=files)
             assert r.json()["summary"]["processed"] == len(pdfs), r.text
-        yield client, a["id"], b["id"], url
+        yield alice, bob, a, b, url
     database.reset_store()
     investigation_service._manager = None
     mp.undo()
     drop_graphs(url)
 
 
-def paper_ids(client, pid):
-    return {p["id"] for p in client.get(f"/api/projects/{pid}/papers").json()["papers"]}
+def papers(client, pid):
+    return {p["id"]: p for p in client.get(f"/api/projects/{pid}/papers").json()["papers"]}
 
 
-def investigate(client, pid, question):
-    r = client.post(f"/api/projects/{pid}/investigations", json={"question": question, "use_llm": False})
+def paper_about(client, pid, word):
+    return next(i for i, p in papers(client, pid).items() if word.lower() in (p["title"] or "").lower())
+
+
+def investigate(client, pid, paper_id, question):
+    r = client.post(f"/api/projects/{pid}/investigations", json={"question": question, "paper_id": paper_id, "wait": True})
     assert r.status_code == 200, r.text
     return r.json()
 
 
-def test_each_project_lists_only_its_papers(env):
-    client, a, b, _ = env
-    pa, pb = paper_ids(client, a), paper_ids(client, b)
+def test_each_account_sees_only_its_own_projects_and_papers(env):
+    alice, bob, a, b, _ = env
+    pa, pb = set(papers(alice, a)), set(papers(bob, b))
     assert len(pa) == 3 and len(pb) == 2 and not pa & pb
-    assert client.get("/api/papers").json()["counts"]["total"] == 0  # legacy route = Default project, untouched
-    projects = {p["id"]: p for p in client.get("/api/projects").json()["projects"]}
-    assert projects[a]["paper_count"] == 3 and projects[b]["paper_count"] == 2 and projects["default"]["is_default"]
+    assert [p["id"] for p in alice.get("/api/projects").json()["projects"]] == [a]
+    assert [p["id"] for p in bob.get("/api/projects").json()["projects"]] == [b]
+    for url in (f"/api/projects/{a}", f"/api/projects/{a}/papers", f"/api/projects/{a}/graph/overview",
+                f"/api/projects/{a}/papers/{sorted(pa)[0]}", f"/api/projects/{a}/papers/{sorted(pa)[0]}/file"):
+        assert bob.get(url).status_code == 404, url
 
 
-def test_tools_cannot_reach_another_projects_graph(env):
-    client, a, b, _ = env
-    pa, pb = paper_ids(client, a), paper_ids(client, b)
+def test_tools_cannot_reach_another_accounts_graph(env):
+    alice, bob, a, b, _ = env
+    pa, pb = set(papers(alice, a)), set(papers(bob, b))
     reg = database.get_registry()
-    for pid, own, other_question in ((a, pa, BEE_Q), (b, pb, DTI_Q)):
-        tools = ResearchTools(database.store_for(reg.get_project(pid)))
+    for owner_client, pid, own, other_question in ((alice, a, pa, BEE_Q), (bob, b, pb, DTI_Q)):
+        owner = owner_client.get("/api/auth/me").json()["id"]
+        tools = ResearchTools(database.store_for(reg.get_project(pid, owner)))
         mcp = MCPToolClient(tools)
         hits = mcp.call("search_evidence", {"query": other_question, "top_k": 15})["results"]
-        assert {h["paper_id"] for h in hits} <= own  # vector + keyword search see only this project
+        assert {h["paper_id"] for h in hits} <= own  # vector + keyword search see only this account's project
         rows = mcp.call("graph_query", {"cypher": "MATCH (p:Paper) RETURN p.id AS id"})["rows"]
         assert {r["id"] for r in rows} == own  # even free-form Cypher is confined to the project graph
-        claims = mcp.call("compare_claims", {"topic": other_question})["statements_by_paper"]
-        assert {s["paper_id"] for v in claims.values() for s in v} <= own
 
 
-def test_questions_never_retrieve_the_other_projects_evidence(env):
-    client, a, b, _ = env
-    pa, pb = paper_ids(client, a), paper_ids(client, b)
-    bee_in_a = investigate(client, a, BEE_Q)["result"]
-    assert bee_in_a["evidence_found"] is False and bee_in_a["sources"] == [] and bee_in_a["confidence"]["level"] == "low"
-    dti_in_b = investigate(client, b, DTI_Q)["result"]
-    assert dti_in_b["evidence_found"] is False and dti_in_b["sources"] == []
+def test_an_investigation_reads_only_its_one_paper(env):
+    alice, _, a, _, _ = env
+    for paper_id in papers(alice, a):
+        res = investigate(alice, a, paper_id, DTI_Q)
+        assert res["paper_ids"] == [paper_id]
+        r = res["result"]
+        assert {s["paper_id"] for s in r["sources"]} <= {paper_id}
+        assert {f["paper_id"] for f in r["findings"]} <= {paper_id}
+        assert {g_e["paper_id"] for g in r["gaps"] for g_e in g["evidence"]} <= {paper_id}
+        assert r["comparisons"] == []  # nothing is compared with other papers
+        assert all(e["chunk_id"].startswith(paper_id + ":") for e in r["sources"])
 
-    bee_in_b = investigate(client, b, BEE_Q)["result"]
-    assert bee_in_b["evidence_found"] and bee_in_b["sources"]
-    assert {s["paper_id"] for s in bee_in_b["sources"]} <= pb
-    dti_in_a = investigate(client, a, DTI_Q)["result"]
-    assert {s["paper_id"] for s in dti_in_a["sources"]} <= pa
-    assert any(c["kind"] == "contradiction" for c in dti_in_a["comparisons"])
+
+def test_off_topic_paper_has_no_evidence(env):
+    _, bob, _, b, _ = env
+    bee = next(iter(papers(bob, b)))
+    res = investigate(bob, b, bee, DTI_Q)["result"]
+    assert res["evidence_found"] is False and res["sources"] == [] and res["confidence"]["level"] == "low"
 
 
 def test_citations_trace_to_stored_passages(env):
-    client, a, _, _ = env
-    res = investigate(client, a, DTI_Q)["result"]
-    store = database.store_for(database.get_registry().get_project(a))
+    alice, _, a, _, _ = env
+    paper_id = paper_about(alice, a, "graph attention")
+    res = investigate(alice, a, paper_id, DTI_Q)["result"]
+    owner = alice.get("/api/auth/me").json()["id"]
+    store = database.store_for(database.get_registry().get_project(a, owner))
     rows = store.query("UNWIND $ids AS cid MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk {id: cid}) "
-                       "RETURN c.id AS id, p.id AS pid, c.page AS page, c.text AS text",
+                       "RETURN c.id AS id, p.id AS pid, c.page AS page",
                        {"ids": [s["chunk_id"] for s in res["sources"]]})
     stored = {r["id"]: r for r in rows}
+    assert res["sources"]
     for s in res["sources"]:
-        assert s["chunk_id"] in stored and stored[s["chunk_id"]]["pid"] == s["paper_id"]
+        assert s["chunk_id"] in stored and stored[s["chunk_id"]]["pid"] == s["paper_id"] == paper_id
         assert stored[s["chunk_id"]]["page"] == s["page"]
     numbers = {s["n"] for s in res["sources"]}
     cited = ({n for f in res["findings"] for n in f["citations"]} | {n for g in res["gaps"] for n in g["citations"]}
-             | {n for l in res["limitations"] for n in l["citations"]})
+             | {n for lim in res["limitations"] for n in lim["citations"]})
     assert cited <= numbers
 
 
-def test_gaps_need_concrete_evidence_from_two_papers(env):
-    client, a, b, _ = env
-    for pid, q in ((a, DTI_Q), (b, "Which limitations of urban apiary studies remain open?")):
-        res = investigate(client, pid, q)["result"]
-        for g in res["gaps"]:
-            assert g["support_papers"] >= 2 and len({e["paper_id"] for e in g["evidence"]}) >= 2, g
-    bee_gaps = investigate(client, b, "Which limitations of urban apiary studies remain open?")["result"]["gaps"]
-    # Both bee papers state that street-level colonies were not evaluated: a recurring, two-paper gap
-    assert any(g["type"] == "recurring_limitation" for g in bee_gaps), bee_gaps
-
-
-def test_saved_investigations_survive_restart_and_stay_in_their_project(env):
-    client, a, b, _ = env
-    done = investigate(client, a, DTI_Q)
+def test_saved_investigations_survive_restart_and_stay_private(env):
+    alice, bob, a, b, _ = env
+    paper_id = paper_about(alice, a, "graph attention")
+    done = investigate(alice, a, paper_id, DTI_Q)
     inv_id = done["id"]
     # Simulate an API restart: drop the in-memory manager and every cached connection.
     investigation_service._manager = None
     database.reset_store()
-    again = client.get(f"/api/projects/{a}/investigations/{inv_id}")
+    again = alice.get(f"/api/projects/{a}/investigations/{inv_id}")
     assert again.status_code == 200
     body = again.json()
-    assert body["status"] == "completed" and body["project_id"] == a
+    assert body["status"] == "completed" and body["project_id"] == a and body["paper_ids"] == [paper_id]
     assert body["result"]["report_markdown"] == done["result"]["report_markdown"]
-    assert [s["chunk_id"] for s in body["result"]["sources"]] == [s["chunk_id"] for s in done["result"]["sources"]]
-    listed = client.get(f"/api/projects/{a}/investigations").json()
-    assert inv_id in [i["id"] for i in listed["investigations"]] and listed["total"] >= 1
-    # Not visible from the other project or the Default project
-    assert client.get(f"/api/projects/{b}/investigations/{inv_id}").status_code == 404
-    assert client.get(f"/api/investigations/{inv_id}").status_code == 404
-    assert inv_id not in [i["id"] for i in client.get(f"/api/projects/{b}/investigations").json()["investigations"]]
-    # Deleting a saved investigation
-    assert client.delete(f"/api/projects/{b}/investigations/{inv_id}").status_code == 404
-    assert client.delete(f"/api/projects/{a}/investigations/{inv_id}").status_code == 204
-    assert client.get(f"/api/projects/{a}/investigations/{inv_id}").status_code == 404
+    listed = alice.get(f"/api/projects/{a}/investigations").json()
+    assert inv_id in [i["id"] for i in listed["investigations"]]
+    # Not visible to the other account, through any URL
+    assert bob.get(f"/api/projects/{a}/investigations/{inv_id}").status_code == 404
+    assert bob.get(f"/api/projects/{b}/investigations/{inv_id}").status_code == 404
+    assert inv_id not in [i["id"] for i in bob.get(f"/api/projects/{b}/investigations").json()["investigations"]]
+    assert bob.delete(f"/api/projects/{a}/investigations/{inv_id}").status_code == 404
+    assert alice.delete(f"/api/projects/{a}/investigations/{inv_id}").status_code == 204
+    assert alice.get(f"/api/projects/{a}/investigations/{inv_id}").status_code == 404
 
 
 def test_paper_deletion_is_scoped(env):
-    client, a, b, _ = env
-    pb = sorted(paper_ids(client, b))
-    assert client.delete(f"/api/projects/{a}/papers/{pb[0]}").status_code == 404  # B's paper is not in A
-    assert client.get(f"/api/projects/{a}/papers/{pb[0]}").status_code == 404
-    assert client.get(f"/api/projects/{b}/papers/{pb[0]}").status_code == 200
+    alice, bob, a, b, _ = env
+    pb = sorted(papers(bob, b))
+    assert alice.delete(f"/api/projects/{a}/papers/{pb[0]}").status_code == 404  # Bob's paper is not in Alice's project
+    assert alice.delete(f"/api/projects/{b}/papers/{pb[0]}").status_code == 404  # nor can Alice reach Bob's project
+    assert bob.get(f"/api/projects/{b}/papers/{pb[0]}").status_code == 200
 
 
-def test_delete_project_requires_name_and_removes_everything(env):
-    client, a, b, url = env
+def test_sessions_and_users_are_stored_safely(env):
+    alice, _, _, _, url = env
+    from falkordb import FalkorDB
+    db = FalkorDB.from_url(url)
+    reg = db.select_graph(f"{BASE}_registry")
+    user = reg.ro_query("MATCH (u:User {email_lower: 'alice@example.org'}) RETURN u.password_hash").result_set[0][0]
+    assert user.startswith("$argon2id$")
+    token = alice.cookies.get("rm_session")
+    stored = [r[0] for r in reg.ro_query("MATCH (s:Session) RETURN s.id").result_set]
+    assert token not in stored and stored
+    db.close()
+
+
+def test_delete_account_removes_everything(env):
+    alice, bob, a, b, url = env
     from falkordb import FalkorDB
     graph = f"{BASE}__{b}"
     db = FalkorDB.from_url(url)
     assert graph in db.list_graphs()
-    r = client.request("DELETE", f"/api/projects/{b}", json={"confirm_name": "urban bees"})
-    assert r.status_code == 422  # must match exactly
-    assert client.request("DELETE", "/api/projects/default", json={"confirm_name": "Default project"}).status_code == 403
-    assert client.request("DELETE", f"/api/projects/{b}", json={"confirm_name": "Urban bees"}).status_code == 204
+    assert bob.request("DELETE", "/api/auth/me", json={"password": "violet-harbour-lantern-42"}).status_code == 204
     assert graph not in db.list_graphs()
-    assert client.get(f"/api/projects/{b}").status_code == 404
-    assert client.get(f"/api/projects/{b}/papers").status_code == 404
-    assert len(paper_ids(client, a)) == 3  # the other project is untouched
+    assert bob.get("/api/auth/me").status_code == 401
+    assert len(papers(alice, a)) == 3  # the other account is untouched
     db.close()

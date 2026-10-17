@@ -1,25 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
-  CheckCircle2, Clock, Cpu, Download, FlaskConical, History, Loader2, Network, RotateCcw, Search, Sparkles, Upload, XCircle,
+  Check, CheckCircle2, ChevronDown, ChevronRight, Clock, Download, FileText, FlaskConical, History, Loader2, Network, RotateCcw, Search, Sparkles,
+  Trash2, Upload, XCircle,
 } from 'lucide-react'
 import { ConfidenceBadge, InvestigationResultView } from '../components/InvestigationResult'
-import { Alert, Button, Card, CardHeader, EmptyState, PageHeader, cx } from '../components/ui'
+import { PaperPicker } from '../components/PaperPicker'
+import { Alert, Badge, Button, ButtonLink, Card, CardHeader, EmptyState, PageHeader, ProgressBar, Textarea, cx } from '../components/ui'
 import { useHealth } from '../hooks/HealthContext'
+import { useI18n } from '../i18n/I18nProvider'
+import type { MessageKey } from '../i18n/en'
 import { ApiError, api, getActiveProject, pollInvestigation, toApiError } from '../services/api'
-import { formatDate } from '../services/format'
+import { errorText } from '../services/errors'
 import { buildMarkdownExport, downloadText, reportFilename } from '../services/report'
-import type { Investigation, InvestigationSummary } from '../types/api'
+import type { Investigation, InvestigationSummary, PaperSummary } from '../types/api'
 
 const MIN_CHARS = 10
 const MAX_CHARS = 1000
+const EXAMPLES: MessageKey[] = ['investigate.example.1', 'investigate.example.2', 'investigate.example.3']
 // Per project: reopening the page resumes that project's last investigation, never another project's.
 const storageKey = () => `researchmind.investigation.current.${getActiveProject()}`
-const EXAMPLES = [
-  'Do graph attention models generalize to unseen proteins in drug-target prediction?',
-  'How do protein language models compare with graph neural networks in cold-start settings?',
-  'Which limitations recur across papers on binding affinity prediction?',
-]
 
 function storedId(): string | null {
   try { return sessionStorage.getItem(storageKey()) } catch { return null }
@@ -32,92 +32,149 @@ function useElapsed(running: boolean, startedAt: string | null): number {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!running) return
-    const t = window.setInterval(() => setNow(Date.now()), 500)
-    return () => window.clearInterval(t)
+    const timer = window.setInterval(() => setNow(Date.now()), 500)
+    return () => window.clearInterval(timer)
   }, [running])
   if (!startedAt) return 0
   return Math.max(0, (now - new Date(startedAt).getTime()) / 1000)
 }
 
-function ProgressPanel({ inv }: { inv: Investigation | null }) {
+const STAGES: MessageKey[] = ['progress.stage.retrieve', 'progress.stage.ai', 'progress.stage.verify', 'progress.stage.report']
+
+/**
+ * Where an investigation is, from its live events: evidence retrieval through the graph tools,
+ * the AI writing (with its token count), citation verification, done. Returns a stage and a percentage.
+ */
+export function estimateProgress(inv: Investigation | null): { stage: number; pct: number } {
+  if (!inv) return { stage: 0, pct: 2 }
+  if (inv.status === 'completed') return { stage: 4, pct: 100 }
+  const events = inv.progress
+  if (!events.length) return { stage: 0, pct: 4 }
+  let stage = 0
+  let pct = 8
+  const results = events.filter((e) => e.type === 'tool_result').length
+  pct = Math.max(pct, 8 + (Math.min(results, 8) / 8) * 37)
+  let tokens = 0
+  for (const e of events) {
+    if (/reading \d+ sources|planning the investigation|generating/i.test(e.message)) stage = Math.max(stage, 1)
+    const m = e.message.match(/generating\D*(\d+) tokens/i)
+    if (m) tokens = Number(m[1])
+    if (/building structured report|verifying citations/i.test(e.message)) stage = Math.max(stage, 2)
+  }
+  if (stage >= 1) pct = Math.max(pct, 50 + Math.min(tokens / 900, 1) * 35)
+  if (stage >= 2) pct = Math.max(pct, 92)
+  return { stage, pct: Math.min(pct, 97) }
+}
+
+function ProgressPanel({ inv, paperTitle }: { inv: Investigation | null; paperTitle: string | null }) {
+  const { t, formatNumber } = useI18n()
   const running = !inv || inv.status === 'queued' || inv.status === 'running'
   const elapsed = useElapsed(running, inv?.started_at ?? inv?.created_at ?? null)
+  const [showLog, setShowLog] = useState(false)
   const events = inv?.progress ?? []
-  const toolCalls = events.filter((e) => e.type === 'tool_call').length
+  const { stage, pct } = estimateProgress(inv)
   const listRef = useRef<HTMLOListElement>(null)
-  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight }) }, [events.length])
+  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight }) }, [events.length, showLog])
 
   return (
-    <Card>
+    <Card className="animate-fade-up overflow-hidden">
       <CardHeader
-        title="Investigating…"
-        subtitle={inv?.mode === 'llm'
-          ? `${inv.provider ?? 'LLM'} / ${inv.model ?? 'model'} is reasoning over evidence retrieved through MCP graph tools${inv.provider === 'ollama' ? ' (local models can take a few minutes)' : ''}`
-          : 'Running the offline evidence plan over MCP graph tools'}
-        action={<span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-slate-500"><Clock className="h-3.5 w-3.5" />{elapsed.toFixed(0)} s · {toolCalls} tool calls</span>}
+        title={<span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin text-brand" />{t('progress.title')}</span>}
+        subtitle={paperTitle ? t('progress.subtitle', { title: paperTitle }) : undefined}
+        action={<span className="inline-flex items-center gap-1.5 text-xs tabular-nums text-fg-subtle"><Clock className="h-3.5 w-3.5" />{formatNumber(Math.round(elapsed))} s</span>}
       />
-      <div className="p-5">
-        <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-slate-100">
-          <div className="h-full w-1/3 animate-[progress_1.6s_ease-in-out_infinite] rounded-full bg-indigo-500" />
+      <div className="space-y-5 p-5">
+        <div>
+          <div className="mb-2 flex items-baseline justify-between">
+            <span className="text-sm font-medium text-fg">{t(STAGES[Math.min(stage, 3)])}</span>
+            <span className="text-sm font-semibold tabular-nums text-brand">{Math.round(pct)}%</span>
+          </div>
+          <ProgressBar value={pct} label={t('progress.title')} className="h-2" />
         </div>
-        {events.length === 0 ? (
-          <p className="inline-flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Starting the investigation…</p>
-        ) : (
-          <ol ref={listRef} className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-sm" aria-live="polite">
-            {events.map((e, i) => {
-              const last = i === events.length - 1
-              return (
+        <ol className="grid gap-3 sm:grid-cols-4">
+          {STAGES.map((key, i) => {
+            const done = i < stage
+            const current = i === stage
+            return (
+              <li key={key} className={cx('flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors duration-300',
+                done ? 'border-ok/30 bg-ok-soft text-ok-fg' : current ? 'border-brand/40 bg-brand-soft text-brand-fg' : 'border-line text-fg-subtle')}>
+                <span className={cx('flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold',
+                  done ? 'bg-ok text-white' : current ? 'bg-brand text-white' : 'bg-surface-3 text-fg-subtle')}>
+                  {done ? <Check className="h-3 w-3" /> : current ? <Loader2 className="h-3 w-3 animate-spin" /> : i + 1}
+                </span>
+                <span className="font-medium">{t(key)}</span>
+              </li>
+            )
+          })}
+        </ol>
+        <p className="text-xs text-fg-subtle">{t('progress.hint')}</p>
+        <div>
+          <button type="button" onClick={() => setShowLog((v) => !v)} className="inline-flex items-center gap-1 text-xs font-medium text-fg-muted hover:text-fg">
+            {showLog ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5 rtl:rotate-180" />}{t('progress.log')}
+          </button>
+          {showLog && (
+            <ol ref={listRef} className="mt-2 max-h-60 animate-fade-in space-y-1.5 overflow-y-auto rounded-lg bg-surface-2 p-3 text-xs" dir="ltr" aria-live="polite">
+              {events.map((e, i) => (
                 <li key={i} className="flex items-start gap-2">
-                  {e.type === 'tool_call' ? <Network className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />
-                    : e.type === 'tool_result' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
-                      : e.type === 'error' ? <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
-                        : last ? <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-slate-400" />
-                          : <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />}
-                  <span className={cx('min-w-0 flex-1 break-words', e.type === 'thought' ? 'italic text-slate-500' : 'text-slate-700')}>{e.message}</span>
-                  <span className="shrink-0 text-xs tabular-nums text-slate-400">{e.at.toFixed(1)}s</span>
+                  {e.type === 'tool_call' ? <Network className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+                    : e.type === 'tool_result' ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ok" />
+                      : e.type === 'error' ? <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-bad" />
+                        : <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-subtle" />}
+                  <span className="min-w-0 flex-1 break-words text-fg-muted">{e.message}</span>
+                  <span className="shrink-0 tabular-nums text-fg-subtle">{e.at.toFixed(1)}s</span>
                 </li>
-              )
-            })}
-          </ol>
-        )}
+              ))}
+            </ol>
+          )}
+        </div>
       </div>
     </Card>
   )
 }
 
-function RecentList({ items, currentId, onOpen, onDelete }: { items: InvestigationSummary[]; currentId: string | null; onOpen: (id: string) => void; onDelete: (id: string) => void }) {
-  if (!items.length) return null
+function HistoryList({ items, currentId, onOpen, onDelete }: { items: InvestigationSummary[]; currentId: string | null; onOpen: (id: string) => void; onDelete: (id: string) => void }) {
+  const { t, formatDate } = useI18n()
+  const [confirm, setConfirm] = useState<string | null>(null)
   return (
     <Card>
-      <CardHeader title="Saved investigations" subtitle="Saved in this project; reopen any time" />
-      <ul className="divide-y divide-slate-100">
-        {items.map((it) => (
-          <li key={it.id}>
-            <div className="group flex items-start">
-            <button type="button" onClick={() => onOpen(it.id)}
-              className={cx('flex w-full items-start gap-3 px-5 py-2.5 text-left hover:bg-slate-50', it.id === currentId && 'bg-indigo-50/50')}>
-              <History className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
-              <span className="min-w-0 flex-1">
-                <span className="line-clamp-2 text-sm text-slate-800">{it.question}</span>
-                <span className="text-xs text-slate-500">{formatDate(it.created_at)} · {it.status}{it.mode ? ` · ${it.mode}` : ''}</span>
-              </span>
-            </button>
-            {it.status !== 'running' && it.status !== 'queued' && (
-              <button type="button" onClick={() => onDelete(it.id)} title="Delete this saved investigation"
-                className="mr-3 mt-2.5 rounded p-1 text-xs text-slate-300 opacity-0 hover:bg-red-50 hover:text-red-600 group-hover:opacity-100">✕</button>
-            )}
-            </div>
-          </li>
-        ))}
-      </ul>
+      <CardHeader title={<span className="flex items-center gap-2"><History className="h-4 w-4 text-brand" />{t('history.title')}</span>} subtitle={t('history.subtitle')} />
+      {!items.length ? <p className="px-5 py-6 text-sm text-fg-subtle">{t('history.empty')}</p> : (
+        <ul className="max-h-[480px] divide-y divide-line overflow-y-auto">
+          {items.map((it) => (
+            <li key={it.id} className={cx('group relative transition-colors', it.id === currentId ? 'bg-brand-soft/50' : 'hover:bg-surface-2')}>
+              <button type="button" onClick={() => onOpen(it.id)} className="flex w-full items-start gap-3 px-5 py-3 pe-12 text-start">
+                <span className={cx('mt-1.5 h-2 w-2 shrink-0 rounded-full', it.status === 'completed' ? 'bg-ok' : it.status === 'failed' ? 'bg-bad' : 'animate-pulse bg-brand')} />
+                <span className="min-w-0 flex-1">
+                  <span className="line-clamp-2 text-sm text-fg" dir="auto">{it.question}</span>
+                  <span className="mt-0.5 block truncate text-xs text-fg-subtle">{it.paper_title ? `${it.paper_title} · ` : ''}{formatDate(it.created_at)}</span>
+                </span>
+              </button>
+              {it.status !== 'running' && it.status !== 'queued' && (
+                confirm === it.id ? (
+                  <div className="flex items-center justify-end gap-2 px-5 pb-3">
+                    <Button variant="danger" size="sm" onClick={() => { setConfirm(null); onDelete(it.id) }}>{t('common.delete')}</Button>
+                    <Button variant="ghost" size="sm" onClick={() => setConfirm(null)}>{t('common.cancel')}</Button>
+                  </div>
+                ) : (
+                  <button type="button" onClick={() => setConfirm(it.id)} title={t('history.delete')} aria-label={t('history.delete')}
+                    className="absolute end-3 top-3 rounded p-1.5 text-fg-subtle opacity-0 transition-all hover:bg-bad-soft hover:text-bad-fg focus:opacity-100 group-hover:opacity-100">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </Card>
   )
 }
 
 export function InvestigatePage() {
+  const { t, lang } = useI18n()
   const { health } = useHealth()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [question, setQuestion] = useState('')
-  const [useLlm, setUseLlm] = useState(true)
   const [requirements, setRequirements] = useState('')
   const [showReq, setShowReq] = useState(false)
   const [inv, setInv] = useState<Investigation | null>(null)
@@ -125,21 +182,33 @@ export function InvestigatePage() {
   const [error, setError] = useState<ApiError | null>(null)
   const [recent, setRecent] = useState<InvestigationSummary[]>([])
   const [stalls, setStalls] = useState(0)
+  const [papers, setPapers] = useState<PaperSummary[] | null>(null)
+  const [paperId, setPaperId] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
-  const dbStatus = health?.database.status
-  const dbReady = dbStatus === 'connected'
-  const llm = health?.config.llm
-  const llmConfigured = health?.config.llm_configured ?? false
-  // Anthropic is not contacted by the status check ("configured"); Ollama must be reachable with the model installed.
-  const llmReady = llm?.status === 'ready' || llm?.status === 'configured'
-  const llmLabel = llm && llm.provider !== 'none' ? `${llm.provider} / ${llm.model ?? 'no model set'}` : null
+  // The paper to analyse: ?paper=<id> (from an upload or a paper page), otherwise the newest paper.
+  useEffect(() => {
+    api.listPapers({ status: 'processed', limit: 200 }).then((r) => {
+      const list = [...r.papers].sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+      setPapers(list)
+      const wanted = searchParams.get('paper')
+      setPaperId(list.find((p) => p.id === wanted)?.id ?? list[0]?.id ?? null)
+    }).catch(() => setPapers([]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const dbReady = health?.database.status === 'connected'
+  const ai = health?.config.llm
+  const aiReady = ai?.status === 'ready' || ai?.status === 'configured'
+  const aiRequired = health?.config.ai_required ?? true
+  const aiBlocked = health != null && aiRequired && !aiReady
   const trimmed = question.trim()
   const tooShort = trimmed.length > 0 && trimmed.length < MIN_CHARS
   const running = busy || inv?.status === 'queued' || inv?.status === 'running'
+  const paper = useMemo(() => papers?.find((p) => p.id === paperId) ?? null, [papers, paperId])
 
   const refreshRecent = useCallback(() => {
-    api.listInvestigations(20).then((r) => setRecent(r.investigations)).catch(() => { /* list is optional */ })
+    api.listInvestigations(30).then((r) => setRecent(r.investigations)).catch(() => { /* list is optional */ })
   }, [])
 
   const follow = useCallback(async (id: string) => {
@@ -162,23 +231,27 @@ export function InvestigatePage() {
     }
   }, [refreshRecent])
 
-  // Resume the investigation that was open before navigating away; stop polling on unmount.
+  // Open ?open=<id> (from the overview), else resume the investigation that was open before; stop polling on unmount.
   useEffect(() => {
-    const id = storedId()
-    if (id) {
-      void follow(id)
+    const requested = searchParams.get('open')
+    const id = requested && /^inv_[0-9a-f]{12}$/.test(requested) ? requested : storedId()
+    if (requested) {
+      storeId(requested)
+      setSearchParams((p) => { p.delete('open'); return p }, { replace: true })
     }
+    if (id) void follow(id)
     refreshRecent()
     return () => abortRef.current?.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [follow, refreshRecent])
 
   const start = async () => {
-    if (trimmed.length < MIN_CHARS || running) return
+    if (trimmed.length < MIN_CHARS || running || !paperId || aiBlocked) return
     setError(null)
     setInv(null)
     setBusy(true)
     try {
-      const created = await api.startInvestigation(trimmed, useLlm && llmReady, requirements.trim() || undefined)
+      const created = await api.startInvestigation(trimmed, paperId, { requirements: requirements.trim() || undefined, language: lang })
       setInv(created)
       storeId(created.id)
       refreshRecent()
@@ -193,10 +266,10 @@ export function InvestigatePage() {
     storeId(id)
     setInv(null)
     void follow(id)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   const removeSaved = async (id: string) => {
-    if (!window.confirm('Delete this saved investigation?')) return
     try {
       await api.deleteInvestigation(id)
       if (inv?.id === id) { storeId(null); setInv(null) }
@@ -213,148 +286,116 @@ export function InvestigatePage() {
   }
 
   const result = inv?.status === 'completed' ? inv.result : null
+  const noPapers = papers !== null && papers.length === 0
 
   return (
     <>
       <PageHeader
-        title="Investigate"
-        description="Ask a research question. The agent searches your knowledge graph through MCP tools, compares evidence across papers and reports candidate gaps — every statement cited to a paper and page."
+        title={t('investigate.title')}
+        description={t('investigate.description')}
         actions={result && inv ? (
           <>
-            <Button variant="secondary" onClick={reset}><RotateCcw className="h-4 w-4" /> New investigation</Button>
-            <Button onClick={() => downloadText(reportFilename(inv), buildMarkdownExport(inv))}><Download className="h-4 w-4" /> Export Markdown</Button>
+            <Button variant="secondary" onClick={reset}><RotateCcw className="h-4 w-4" /> {t('investigate.new')}</Button>
+            <Button onClick={() => downloadText(reportFilename(inv), buildMarkdownExport(inv, t))}><Download className="h-4 w-4" /> {t('investigate.export')}</Button>
           </>
         ) : undefined}
       />
 
       <div className="space-y-6">
-        {health && !dbReady && (
-          <Alert tone="error" title="Knowledge graph not available">
-            {dbStatus === 'not_configured'
-              ? 'FALKORDB_URL is not set in backend/.env, so there is no graph to investigate.'
-              : 'The API cannot reach FalkorDB right now. Investigations will start once the database is connected.'}
-          </Alert>
-        )}
-        {health && dbReady && !llmConfigured && (
-          <Alert tone="info" title="No LLM configured — offline investigation mode">
-            Investigations run a fixed evidence plan over the same MCP graph tools and produce an extractive, fully cited report.
-            For LLM reasoning set <code>LLM_PROVIDER=ollama</code> and <code>LLM_MODEL</code> in <code>backend/.env</code> (see README) and restart the API.
-          </Alert>
-        )}
-        {health && dbReady && llmConfigured && !llmReady && llm && (
-          <Alert tone="warning" title={`LLM unavailable (${llmLabel}) — offline reports only`}>
-            {llm.message} Investigations still run in offline mode.
-          </Alert>
-        )}
+        {health && !dbReady && <Alert tone="error" title={t('error.unavailable.title')}>{t('error.unavailable')}</Alert>}
+        {health && dbReady && aiBlocked && <Alert tone="error" title={t('investigate.aiDown.title')}>{t('investigate.aiDown.text')}</Alert>}
 
-        <div className="grid gap-6 xl:grid-cols-3">
-          <Card className="xl:col-span-2">
-            <CardHeader title="Research question" subtitle="Specific, answerable questions work best. The agent only uses your ingested papers." />
-            <form className="space-y-3 p-5" onSubmit={(e) => { e.preventDefault(); void start() }}>
-              <label htmlFor="question" className="sr-only">Research question</label>
-              <textarea
-                id="question"
-                rows={3}
-                value={question}
-                maxLength={MAX_CHARS}
-                disabled={running}
-                onChange={(e) => setQuestion(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void start() } }}
-                placeholder="e.g. Do graph attention models generalize to unseen proteins in drug-target prediction?"
-                className="w-full resize-y rounded-lg border border-slate-300 p-3 text-sm text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 disabled:bg-slate-50 disabled:text-slate-500"
-              />
-              {showReq && (
-                <div className="rounded-lg border border-violet-200 bg-violet-50/40 p-3">
-                  <label htmlFor="requirements" className="text-xs font-medium text-violet-900">
-                    Your project requirements (optional) — compared with the papers, cited as [R], never treated as published evidence
-                  </label>
-                  <textarea id="requirements" rows={3} maxLength={3000} disabled={running} value={requirements}
-                    onChange={(e) => setRequirements(e.target.value)}
-                    placeholder="e.g. CK KidBrace: an infant wearable that monitors heart rate, temperature and SpO2 and alerts parents through a mobile app."
-                    className="mt-1.5 w-full resize-y rounded-md border border-violet-200 bg-white p-2 text-sm text-slate-900 focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20" />
-                </div>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {EXAMPLES.map((ex) => (
-                  <button key={ex} type="button" disabled={running} onClick={() => setQuestion(ex)}
-                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs text-slate-600 hover:border-indigo-300 hover:text-indigo-700 disabled:opacity-50">
-                    {ex}
-                  </button>
-                ))}
-              </div>
-              <div className="flex flex-col gap-3 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500">
-                  <label className={cx('inline-flex items-center gap-2', !llmReady && 'opacity-60')} title={llm?.message}>
-                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-indigo-600" checked={useLlm && llmReady}
-                      disabled={!llmReady || running} onChange={(e) => setUseLlm(e.target.checked)} />
-                    <Cpu className="h-3.5 w-3.5" /> Use LLM reasoning
-                    {llmLabel ? (
-                      <span className={cx('rounded px-1.5 py-0.5 text-[10px] font-medium', llmReady ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-800')}>
-                        {llmLabel} · {llm?.status.replace('_', ' ')}
-                      </span>
-                    ) : ' (not configured)'}
-                  </label>
-                  <button type="button" onClick={() => setShowReq((v) => !v)} className="font-medium text-indigo-600 hover:text-indigo-500">
-                    {showReq ? 'Hide' : 'Add'} project requirements{requirements.trim() ? ' ✓' : ''}
-                  </button>
-                  <span className={cx('tabular-nums', tooShort && 'text-amber-600')}>
-                    {tooShort ? `At least ${MIN_CHARS} characters` : `${trimmed.length}/${MAX_CHARS}`} · Ctrl+Enter to run
-                  </span>
-                </div>
-                <Button type="submit" disabled={running || trimmed.length < MIN_CHARS || (health != null && !dbReady)}>
-                  {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                  {running ? 'Investigating…' : 'Investigate'}
-                </Button>
-              </div>
-            </form>
+        {noPapers ? (
+          <Card>
+            <EmptyState icon={<FileText className="h-6 w-6" />} title={t('investigate.noPapers.title')} description={t('investigate.noPapers.text')}
+              action={<ButtonLink to="/upload"><Upload className="h-4 w-4" />{t('nav.upload')}</ButtonLink>} />
           </Card>
-          <RecentList items={recent} currentId={inv?.id ?? null} onOpen={open} onDelete={(id) => void removeSaved(id)} />
-        </div>
-
-        {error && (
-          <Alert tone="error" title={error.code === 'no_papers' ? 'No papers to investigate' : error.code === 'busy' ? 'Investigations busy' : 'Investigation failed'}
-            action={error.code === 'no_papers'
-              ? <Link to="/upload"><Button variant="secondary"><Upload className="h-4 w-4" /> Upload PDFs</Button></Link>
-              : trimmed.length >= MIN_CHARS ? <Button variant="secondary" onClick={() => void start()} disabled={running}><RotateCcw className="h-4 w-4" /> Retry</Button> : undefined}>
-            {error.message}
-          </Alert>
-        )}
-
-        {running && stalls > 0 && (
-          <Alert tone="warning" title="The backend is busy — still waiting">
-            The API has not answered {stalls} status check{stalls === 1 ? '' : 's'} in a row. This is normal while a local model runs on the CPU;
-            the investigation continues in the background.
-          </Alert>
-        )}
-        {running && <ProgressPanel inv={inv} />}
-
-        {result && inv && (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-slate-200 bg-white px-5 py-3 text-sm shadow-sm">
-              <span className="min-w-0 flex-1 font-medium text-slate-900">{inv.question}</span>
-              <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><CheckCircle2 className="h-3.5 w-3.5" /> Completed</span>
-              <span className={cx('rounded-full px-2 py-0.5 text-xs', result.mode === 'llm' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600')}>
-                {result.mode === 'llm' ? `LLM report · ${inv.provider} / ${inv.model}` : 'Offline extractive report (no LLM)'}
-              </span>
-              <ConfidenceBadge level={result.confidence.level} />
-              <span className="text-xs tabular-nums text-slate-500">{inv.duration_seconds?.toFixed(1)} s · {result.steps.length} tool calls</span>
-            </div>
-            {inv.requirements && (
-              <div className="rounded-lg border border-violet-200 bg-violet-50/40 px-4 py-2 text-xs text-violet-900">
-                <span className="font-semibold">[R] Your requirements:</span> {inv.requirements}
-              </div>
-            )}
-            <InvestigationResultView result={result} provider={inv.provider} model={inv.model} />
+        ) : (
+          <div className="grid gap-6 xl:grid-cols-3">
+            <Card className="xl:col-span-2">
+              <CardHeader title={t('investigate.question')} subtitle={t('investigate.question.subtitle')}
+                action={ai?.model && aiReady ? <Badge tone="brand"><Sparkles className="h-3 w-3" />{ai.model}</Badge> : undefined} />
+              <form className="space-y-4 p-5" onSubmit={(e) => { e.preventDefault(); void start() }}>
+                {papers === null ? <div className="skeleton h-16 w-full" /> : (
+                  <PaperPicker papers={papers} selected={paperId} onSelect={setPaperId} disabled={running} />
+                )}
+                <div>
+                  <label htmlFor="question" className="sr-only">{t('investigate.question')}</label>
+                  <Textarea id="question" rows={3} value={question} maxLength={MAX_CHARS} disabled={running} dir="auto"
+                    onChange={(e) => setQuestion(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void start() } }}
+                    placeholder={t('investigate.placeholder')} className="text-[15px]" />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {EXAMPLES.map((key) => (
+                    <button key={key} type="button" disabled={running} onClick={() => setQuestion(t(key))}
+                      className="rounded-full border border-line bg-surface px-3 py-1 text-xs text-fg-muted transition-all duration-150 hover:-translate-y-px hover:border-brand/50 hover:text-brand active:scale-95 disabled:opacity-50">
+                      {t(key)}
+                    </button>
+                  ))}
+                </div>
+                {showReq && (
+                  <div className="animate-fade-up rounded-lg border border-accent/30 bg-accent-soft/50 p-3">
+                    <label htmlFor="requirements" className="text-xs font-medium text-accent-fg">{t('investigate.requirements.label')}</label>
+                    <Textarea id="requirements" rows={3} maxLength={3000} disabled={running} value={requirements} dir="auto"
+                      onChange={(e) => setRequirements(e.target.value)} placeholder={t('investigate.requirements.placeholder')} className="mt-1.5" />
+                  </div>
+                )}
+                <div className="flex flex-col gap-3 border-t border-line pt-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap items-center gap-4 text-xs text-fg-subtle">
+                    <button type="button" onClick={() => setShowReq((v) => !v)} className="font-medium text-brand hover:text-brand-hover">
+                      {showReq ? t('investigate.requirements.hide') : t('investigate.requirements.add')}{requirements.trim() ? ' ✓' : ''}
+                    </button>
+                    <span className={cx('tabular-nums', tooShort && 'text-warn-fg')}>
+                      {tooShort ? t('investigate.tooShort', { min: MIN_CHARS }) : `${trimmed.length}/${MAX_CHARS}`} · {t('investigate.shortcut')}
+                    </span>
+                  </div>
+                  <Button type="submit" size="lg" loading={running}
+                    disabled={!paperId || trimmed.length < MIN_CHARS || (health != null && !dbReady) || aiBlocked}>
+                    {!running && <Search className="h-4 w-4" />}
+                    {running ? t('investigate.running') : t('investigate.submit')}
+                  </Button>
+                </div>
+              </form>
+            </Card>
+            <HistoryList items={recent} currentId={inv?.id ?? null} onOpen={open} onDelete={(id) => void removeSaved(id)} />
           </div>
         )}
 
-        {!running && !result && !error && (
+        {error && (
+          <Alert tone="error" title={error.code === 'busy' ? t('investigate.busy.title') : t('investigate.failed.title')}
+            action={trimmed.length >= MIN_CHARS && paperId ? <Button variant="secondary" size="sm" onClick={() => void start()} disabled={running}><RotateCcw className="h-4 w-4" /> {t('common.retry')}</Button> : undefined}>
+            {errorText(t, error)}
+          </Alert>
+        )}
+
+        {running && stalls > 0 && <Alert tone="warning" title={t('investigate.stalled.title')}>{t('investigate.stalled.text')}</Alert>}
+        {running && <ProgressPanel inv={inv} paperTitle={inv?.paper_title ?? paper?.display_title ?? null} />}
+
+        {result && inv && (
+          <div className="space-y-4">
+            <div className="flex animate-fade-up flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-line bg-surface px-5 py-3 text-sm shadow-card">
+              <span className="min-w-0 flex-1 font-medium text-fg" dir="auto">{inv.question}</span>
+              <Badge tone="ok"><CheckCircle2 className="h-3.5 w-3.5" /> {t('investigate.completed')}</Badge>
+              {inv.paper_title && <Badge title={inv.paper_title}><FileText className="h-3 w-3" /><span className="max-w-[16rem] truncate">{inv.paper_title}</span></Badge>}
+              <Badge tone={result.mode === 'llm' ? 'brand' : 'neutral'}>
+                {result.mode === 'llm' ? <><Sparkles className="h-3 w-3" />{inv.model ?? t('investigate.ai')}</> : t('result.report.offline')}
+              </Badge>
+              <ConfidenceBadge level={result.confidence.level} />
+              <span className="text-xs tabular-nums text-fg-subtle">{inv.duration_seconds?.toFixed(1)} s</span>
+            </div>
+            {inv.requirements && (
+              <div className="rounded-lg border border-accent/30 bg-accent-soft/50 px-4 py-2 text-xs text-accent-fg" dir="auto">
+                <span className="font-semibold">[R] {t('investigate.requirements.yours')}</span> {inv.requirements}
+              </div>
+            )}
+            <InvestigationResultView result={result} model={inv.model} />
+          </div>
+        )}
+
+        {!running && !result && !error && !noPapers && (
           <Card>
-            <EmptyState
-              icon={<FlaskConical className="h-6 w-6" />}
-              title="Ask your first research question"
-              description="Findings, cross-paper comparisons, candidate research gaps and page-level citations will appear here."
-            />
+            <EmptyState icon={<FlaskConical className="h-6 w-6" />} title={t('investigate.empty.title')} description={t('investigate.empty.text')} />
           </Card>
         )}
       </div>

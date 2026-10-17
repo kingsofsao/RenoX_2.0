@@ -94,17 +94,39 @@ export interface LLMStatus {
   reachable: boolean | null
   model_available: boolean | null
   message: string
-  base_url?: string | null
-  installed_models?: string[]
-  version?: string | null
 }
 
 export interface HealthResponse {
   status: 'ok' | 'degraded'
   backend: { status: 'ok'; version: string; uptime_seconds: number }
-  database: { status: DatabaseStatus; graph: string; latency_ms: number | null; message: string | null }
-  config: { max_upload_mb: number; max_files_per_upload: number; llm_configured: boolean; embedding_model: string | null; llm: LLMStatus }
+  database: { status: DatabaseStatus; latency_ms: number | null; message: string | null }
+  config: {
+    max_upload_mb: number; max_files_per_upload: number; llm_configured: boolean; ai_required: boolean
+    embedding_model: string | null; llm: LLMStatus
+  }
   timestamp: string
+}
+
+// ---- Accounts (backend/app/schemas/auth.py) ----
+
+export type ThemeSetting = 'system' | 'light' | 'dark'
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  theme: ThemeSetting
+  language: string
+  created_at: string
+}
+
+export interface SessionInfo {
+  id: string
+  created_at: string
+  last_seen_at: string
+  expires_at: string
+  user_agent: string
+  current: boolean
 }
 
 export interface GraphStats {
@@ -257,6 +279,10 @@ export interface Investigation {
   provider: string | null
   model: string | null
   requirements: string | null
+  /** The one paper the investigation analysed. */
+  paper_ids: string[] | null
+  paper_title: string | null
+  language: string | null
   created_at: string
   started_at: string | null
   finished_at: string | null
@@ -272,6 +298,7 @@ export interface InvestigationSummary {
   question: string
   status: InvestigationStatus
   mode: InvestigationMode | null
+  paper_title: string | null
   created_at: string
   duration_seconds: number | null
 }

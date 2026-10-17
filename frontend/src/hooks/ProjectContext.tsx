@@ -2,50 +2,63 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { api, setActiveProject } from '../services/api'
 import type { Project } from '../types/api'
 
-const STORAGE_KEY = 'researchmind.activeProject'
+// Remembered per account, so a shared computer never opens another person's project id.
+const storageKey = (userId: string) => `researchmind.activeProject.${userId}`
 
 interface ProjectState {
   projects: Project[]
   active: Project | null
   activeId: string
   loading: boolean
+  error: boolean
   select: (id: string) => void
   refresh: () => Promise<void>
 }
 
 const ProjectContext = createContext<ProjectState | null>(null)
 
-function storedId(): string {
-  try { return localStorage.getItem(STORAGE_KEY) || 'default' } catch { return 'default' }
+function stored(userId: string): string {
+  try { return localStorage.getItem(storageKey(userId)) || '' } catch { return '' }
 }
 
-export function ProjectProvider({ children }: { children: ReactNode }) {
+/** Loads the signed-in user's projects and keeps one active; data routes are scoped to it. */
+export function ProjectProvider({ userId, children }: { userId: string; children: ReactNode }) {
   const [projects, setProjects] = useState<Project[]>([])
-  const [activeId, setActiveId] = useState<string>(() => { const id = storedId(); setActiveProject(id); return id })
+  const [activeId, setActiveId] = useState('')
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
 
   const select = useCallback((id: string) => {
     setActiveProject(id)
     setActiveId(id)
-    try { localStorage.setItem(STORAGE_KEY, id) } catch { /* storage unavailable */ }
-  }, [])
+    try { localStorage.setItem(storageKey(userId), id) } catch { /* storage unavailable */ }
+  }, [userId])
 
   const refresh = useCallback(async () => {
     try {
       const list = (await api.listProjects()).projects
       setProjects(list)
-      // The stored project may have been deleted: fall back to the Default project.
-      if (!list.some((p) => p.id === storedId())) select('default')
-    } catch { /* API or database down: keep the current selection */ } finally {
+      setError(false)
+      // The remembered project may have been deleted: fall back to the first one.
+      const remembered = stored(userId)
+      const current = list.find((p) => p.id === remembered) ?? list[0]
+      if (current) select(current.id)
+    } catch {
+      setError(true)
+    } finally {
       setLoading(false)
     }
-  }, [select])
+  }, [select, userId])
 
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    setActiveProject('')
+    void refresh()
+    return () => setActiveProject('')
+  }, [refresh])
 
   const active = projects.find((p) => p.id === activeId) ?? null
   return (
-    <ProjectContext.Provider value={{ projects, active, activeId, loading, select, refresh }}>{children}</ProjectContext.Provider>
+    <ProjectContext.Provider value={{ projects, active, activeId, loading, error, select, refresh }}>{children}</ProjectContext.Provider>
   )
 }
 

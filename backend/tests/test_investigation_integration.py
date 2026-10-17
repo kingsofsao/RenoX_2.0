@@ -1,17 +1,17 @@
 """INTEGRATION tests: the investigation workflow against a real FalkorDB with the sample PDFs.
 
-Real graph, real MCP tools, real HTTP stack. The LLM is NOT used (use_llm=false, offline plan), so
-these run without an Anthropic key. Writes only to the throwaway graph `researchmind_pytest_inv`.
+Real graph, real MCP tools, real HTTP stack, a real account. The LLM is NOT used (offline plan, as
+AI_REQUIRED=false in tests), so these run without a model. Writes only to the throwaway graph `researchmind_pytest_inv`.
 Skipped automatically when no FalkorDB is reachable.
 """
 
 import os
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app import database
 from app.main import app
+from authclient import Client, sign_up
 from researchmind.config import get_settings
 from researchmind.graph import GraphConnectionError, GraphStore
 from researchmind.mcp_bridge import MCPToolClient
@@ -36,11 +36,15 @@ def env(sample_pdfs):
     mp.setenv("FALKORDB_URL", url)
     mp.setenv("FALKORDB_GRAPH", INV_GRAPH)
     database.reset_store()
-    with TestClient(app) as client:
+    with Client(app) as client:
+        client.get("/api/auth/csrf")
+        _, _, pid = sign_up(client)
+        client.project = f"/api/projects/{pid}"
         files = [("files", (p.name, p.read_bytes(), "application/pdf")) for p in sample_pdfs]
-        r = client.post("/api/papers/upload", files=files)
+        r = client.post(f"{client.project}/papers/upload", files=files)
         assert r.json()["summary"]["processed"] == 3, r.text
-        yield client, store
+        owner = client.get("/api/auth/me").json()["id"]
+        yield client, database.store_for(database.get_registry().get_project(pid, owner))
     database.reset_store()
     mp.undo()
     store.graph.delete()
@@ -57,8 +61,8 @@ def test_mcp_tools_on_real_graph(env):
     assert len(papers) == 3
     hits = mcp.call("search_evidence", {"query": "unseen proteins cold-start", "top_k": 4})["results"]
     assert hits and all(h["page"] >= 1 and h["paper_id"] in {p["id"] for p in papers} for h in hits)
-    assert len(mcp.call("explore_entity", {"name": "Graph Attention Network"})["matches"][0]["papers"]) == 3
-    assert mcp.call("compare_claims", {"topic": "generalization to unseen proteins"})["contradictions"]
+    assert all(len(m["papers"]) == 1 for m in mcp.call("explore_entity", {"name": "Graph Attention Network"})["matches"])
+    assert mcp.call("compare_claims", {"topic": "generalization to unseen proteins"})["contradictions"] == []
     paper = mcp.call("get_paper", {"paper_id": papers[0]["id"]})
     assert {"methods", "datasets", "claims", "findings", "limitations"} <= set(paper)
     assert mcp.call("find_research_gaps", {"topic": "cold-start"})["gaps"]
@@ -67,14 +71,15 @@ def test_mcp_tools_on_real_graph(env):
 
 def test_investigation_endpoint_cites_real_evidence(env):
     client, store = env
-    r = client.post("/api/investigations", json={"question": QUESTION, "use_llm": False})
+    paper_id = next(p["id"] for p in client.get(f"{client.project}/papers").json()["papers"]
+                    if "Graph Attention" in (p["title"] or ""))
+    r = client.post(f"{client.project}/investigations", json={"question": QUESTION, "paper_id": paper_id, "wait": True})
     assert r.status_code == 200, r.text
     body = r.json()
     res = body["result"]
     assert body["status"] == "completed" and body["mode"] == "offline"
-    assert res["findings"] and res["gaps"] and res["sources"] and res["limitations"]
-    assert any(c["kind"] == "contradiction" for c in res["comparisons"])
-    assert len({f["paper_id"] for f in res["findings"]}) >= 2
+    assert res["findings"] and res["sources"] and res["limitations"]
+    assert {f["paper_id"] for f in res["findings"]} == {paper_id} and res["comparisons"] == []
 
     # Every source must be a stored chunk of a stored paper, on the page the API reports.
     rows = store.query("""UNWIND $ids AS cid MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk {id: cid})

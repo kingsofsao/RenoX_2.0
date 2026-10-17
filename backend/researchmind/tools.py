@@ -33,16 +33,34 @@ def _fulltext_query(text: str) -> str:
     return "|".join(terms)
 
 
+# The vector indexes rank the whole graph, so a search scoped to a few papers over-fetches
+# candidates and then keeps those of the papers in scope.
+SCOPED_OVERFETCH = 20
+MAX_INDEX_CANDIDATES = 300
+
+
 class ResearchTools:
-    def __init__(self, store: GraphStore):
+    """The graph tools. `paper_ids` limits every tool to those papers (an investigation of the papers
+    the user picked); None means the whole library."""
+
+    def __init__(self, store: GraphStore, paper_ids: list[str] | None = None):
         self.store = store
+        self.scope: list[str] | None = list(dict.fromkeys(paper_ids)) if paper_ids else None
+
+    def in_scope(self, paper_id: str | None) -> bool:
+        return self.scope is None or paper_id in self.scope
+
+    def _candidates(self, k: int) -> int:
+        return min(MAX_INDEX_CANDIDATES, k * SCOPED_OVERFETCH) if self.scope else k
 
     # ------------------------------------------------------------------ catalogue
     def list_papers(self) -> dict:
-        papers = self.store.list_papers()
+        papers = [p for p in self.store.list_papers() if self.in_scope(p["id"])]
         return {"count": len(papers), "papers": papers}
 
     def get_paper(self, paper_id: str) -> dict:
+        if not self.in_scope(paper_id):
+            return {"error": f"Paper {paper_id} is not part of this investigation. Use list_papers to see the papers in scope."}
         q = self.store.query
         meta = q("""MATCH (p:Paper {id: $id}) RETURN p.id AS id, p.title AS title, p.authors AS authors, p.year AS year,
                     p.abstract AS abstract, p.source_file AS source_file, p.num_pages AS num_pages""", {"id": paper_id}, read_only=True)
@@ -69,8 +87,8 @@ class ResearchTools:
         for row in self.store.query(
                 "CALL db.idx.vector.queryNodes('Chunk', 'embedding', $k, vecf32($vec)) YIELD node, score "
                 "RETURN node.id AS id, node.paper_id AS paper_id, 1 - score AS sim",
-                {"k": top_k * 3, "vec": vec}, read_only=True):
-            if paper_id and row["paper_id"] != paper_id:
+                {"k": self._candidates(top_k * 3), "vec": vec}, read_only=True):
+            if (paper_id and row["paper_id"] != paper_id) or not self.in_scope(row["paper_id"]):
                 continue
             scores[row["id"]] = float(row["sim"])
         ft = _fulltext_query(query)
@@ -79,12 +97,12 @@ class ResearchTools:
                 rows = self.store.query(
                     "CALL db.idx.fulltext.queryNodes('Chunk', $q) YIELD node, score "
                     "RETURN node.id AS id, node.paper_id AS paper_id, score LIMIT $k",
-                    {"q": ft, "k": top_k * 3}, read_only=True)
+                    {"q": ft, "k": self._candidates(top_k * 3)}, read_only=True)
             except Exception:
                 rows = []
             best = max((float(r["score"]) for r in rows), default=0) or 1.0
             for r in rows:
-                if paper_id and r["paper_id"] != paper_id:
+                if (paper_id and r["paper_id"] != paper_id) or not self.in_scope(r["paper_id"]):
                     continue
                 # keyword hits add a bounded bonus on top of semantic similarity
                 scores[r["id"]] = scores.get(r["id"], 0.0) + 0.25 * float(r["score"]) / best
@@ -111,6 +129,7 @@ class ResearchTools:
         return {"query": query, "results": results}
 
     def get_evidence(self, chunk_ids: list[str]) -> dict:
+        chunk_ids = [c for c in chunk_ids if self.in_scope(str(c).split(":", 1)[0])]
         rows = self.store.query(
             """UNWIND $ids AS cid MATCH (p:Paper)-[:HAS_CHUNK]->(c:Chunk {id: cid})
                RETURN c.id AS chunk_id, p.title AS paper_title, p.year AS year, c.page AS page, c.section AS section, c.text AS text""",
@@ -123,13 +142,17 @@ class ResearchTools:
         key = slug(name)
         found = []
         for label in labels:
-            rows = self.store.query(f"MATCH (e:{label}) RETURN e.id AS id, e.name AS name", read_only=True)
-            exact = [r for r in rows if r["id"] == key]
-            fuzzy = [] if exact else [r for r in rows if key in r["id"] or r["id"] in key or jaccard(name, r["name"]) >= 0.5]
+            rows = self.store.query(
+                f"MATCH (e:{label}) WHERE $scope IS NULL OR e.paper_id IN $scope RETURN e.id AS id, e.name AS name",
+                {"scope": self.scope}, read_only=True)
+            for r in rows:
+                r["key"] = r["id"].split(":", 1)[-1]  # entity ids are "<paper_id>:<slug>"
+            exact = [r for r in rows if r["key"] == key]
+            fuzzy = [] if exact else [r for r in rows if key in r["key"] or r["key"] in key or jaccard(name, r["name"]) >= 0.5]
             found += [{**r, "label": label} for r in exact + fuzzy]
-        if any(f["id"] == key for f in found):
-            found = [f for f in found if f["id"] == key]
-        return found[:3]
+        if any(f["key"] == key for f in found):
+            found = [f for f in found if f["key"] == key]
+        return [{k: v for k, v in f.items() if k != "key"} for f in found[:3]]
 
     def explore_entity(self, name: str, entity_type: str = "auto") -> dict:
         """Multi-hop: Method/Dataset -> papers -> their findings, datasets/methods, limitations."""
@@ -138,40 +161,50 @@ class ResearchTools:
             return {"error": f"No method or dataset matching '{name}'. Try search_evidence instead."}
         out = []
         for m in matches:
+            if self.scope and not self.store.query(
+                    "MATCH (p:Paper)-[:USES_METHOD|USES_DATASET]->(e {id: $id}) WHERE p.id IN $scope RETURN p.id LIMIT 1",
+                    {"id": m["id"], "scope": self.scope}, read_only=True):
+                continue  # only entities that the papers in scope use
             rel, other_rel, other_label = (("USES_METHOD", "USES_DATASET", "datasets") if m["label"] == "Method"
                                            else ("USES_DATASET", "USES_METHOD", "methods"))
             papers = self.store.query(
-                f"""MATCH (p:Paper)-[r:{rel}]->(e {{id: $id}})
+                f"""MATCH (p:Paper)-[r:{rel}]->(e {{id: $id}}) WHERE $scope IS NULL OR p.id IN $scope
                     OPTIONAL MATCH (p)-[:{other_rel}]->(o)
                     RETURN p.id AS paper_id, p.title AS title, p.year AS year, r.chunk_id AS chunk_id, r.quote AS quote,
-                           collect(DISTINCT o.name) AS {other_label}""", {"id": m["id"]}, read_only=True)
+                           collect(DISTINCT o.name) AS {other_label}""", {"id": m["id"], "scope": self.scope}, read_only=True)
             link = "ABOUT_METHOD" if m["label"] == "Method" else "EVALUATED_ON"
             statements = self.store.query(
-                f"""MATCH (p:Paper)-[]->(s)-[:{link}]->(e {{id: $id}}) MATCH (s)-[:SUPPORTED_BY]->(c:Chunk)
+                f"""MATCH (p:Paper)-[]->(s)-[:{link}]->(e {{id: $id}}) WHERE $scope IS NULL OR p.id IN $scope
+                    MATCH (s)-[:SUPPORTED_BY]->(c:Chunk)
                     RETURN labels(s)[0] AS type, s.text AS text, p.title AS paper_title, c.id AS chunk_id, c.page AS page""",
-                {"id": m["id"]}, read_only=True)
+                {"id": m["id"], "scope": self.scope}, read_only=True)
             limitations = self.store.query(
-                f"""MATCH (p:Paper)-[:{rel}]->(e {{id: $id}}) MATCH (p)-[:HAS_LIMITATION]->(l)-[:SUPPORTED_BY]->(c:Chunk)
+                f"""MATCH (p:Paper)-[:{rel}]->(e {{id: $id}}) WHERE $scope IS NULL OR p.id IN $scope
+                    MATCH (p)-[:HAS_LIMITATION]->(l)-[:SUPPORTED_BY]->(c:Chunk)
                     RETURN l.text AS text, l.kind AS kind, p.title AS paper_title, c.id AS chunk_id, c.page AS page""",
-                {"id": m["id"]}, read_only=True)
+                {"id": m["id"], "scope": self.scope}, read_only=True)
             out.append({"entity": m["name"], "type": m["label"], "papers": papers,
                         "statements_about_it": statements, "limitations_of_papers_using_it": limitations})
+        if not out:
+            return {"error": f"No method or dataset matching '{name}' in the papers of this investigation. Try search_evidence instead."}
         return {"query": name, "matches": out}
 
     def find_related_papers(self, paper_id: str) -> dict:
         """Papers connected to this one via shared methods/datasets or similar/contradicting statements."""
+        if not self.in_scope(paper_id):
+            return {"error": f"Paper {paper_id} is not part of this investigation."}
         shared = self.store.query(
             """MATCH (a:Paper {id: $id})-[:USES_METHOD|USES_DATASET]->(e)<-[:USES_METHOD|USES_DATASET]-(b:Paper)
-               WHERE b.id <> $id
+               WHERE b.id <> $id AND ($scope IS NULL OR b.id IN $scope)
                RETURN b.id AS paper_id, b.title AS title, collect(DISTINCT labels(e)[0] + ': ' + e.name) AS shared_entities""",
-            {"id": paper_id}, read_only=True)
+            {"id": paper_id, "scope": self.scope}, read_only=True)
         statement_links = self.store.query(
             """MATCH (a:Paper {id: $id})-[]->(s)-[x:SIMILAR_TO|CONTRADICTS|ADDRESSED_BY]-(t)<-[]-(b:Paper)
-               WHERE b.id <> $id AND (t:Claim OR t:Finding OR t:Limitation)
+               WHERE b.id <> $id AND (t:Claim OR t:Finding OR t:Limitation) AND ($scope IS NULL OR b.id IN $scope)
                MATCH (s)-[:SUPPORTED_BY]->(cs:Chunk) MATCH (t)-[:SUPPORTED_BY]->(ct:Chunk)
                RETURN b.id AS paper_id, b.title AS title, type(x) AS relation, x.score AS score,
                       s.text AS this_paper_statement, cs.id AS this_chunk_id, t.text AS other_statement, ct.id AS other_chunk_id
-               ORDER BY score DESC LIMIT 20""", {"id": paper_id}, read_only=True)
+               ORDER BY score DESC LIMIT 20""", {"id": paper_id, "scope": self.scope}, read_only=True)
         return {"paper_id": paper_id, "shared_entities": shared, "statement_links": statement_links}
 
     def compare_claims(self, topic: str, top_k: int = 10) -> dict:
@@ -182,9 +215,15 @@ class ResearchTools:
         for label in ("Claim", "Finding"):
             for r in self.store.query(
                     f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $k, vecf32($vec)) YIELD node, score "
-                    "RETURN node.id AS id, 1 - score AS sim", {"k": top_k, "vec": vec}, read_only=True):
+                    "RETURN node.id AS id, 1 - score AS sim", {"k": self._candidates(top_k), "vec": vec}, read_only=True):
                 hits[r["id"]] = float(r["sim"])
-        ids = [i for i, _ in sorted(hits.items(), key=lambda kv: kv[1], reverse=True)[:top_k]]
+        ranked = [i for i, _ in sorted(hits.items(), key=lambda kv: kv[1], reverse=True)]
+        if self.scope:
+            owned = {r["id"] for r in self.store.query(
+                "UNWIND $ids AS sid MATCH (p:Paper)-[]->(s {id: sid}) WHERE p.id IN $scope RETURN s.id AS id",
+                {"ids": ranked, "scope": self.scope}, read_only=True)}
+            ranked = [i for i in ranked if i in owned]
+        ids = ranked[:top_k]
         statements = self.store.query(
             """UNWIND $ids AS sid MATCH (p:Paper)-[]->(s {id: sid})-[:SUPPORTED_BY]->(c:Chunk)
                RETURN s.id AS id, labels(s)[0] AS type, s.text AS text, s.polarity AS polarity,
@@ -196,9 +235,10 @@ class ResearchTools:
             """UNWIND $ids AS sid MATCH (a {id: sid})-[x:CONTRADICTS|SIMILAR_TO]->(b)
                MATCH (a)-[:SUPPORTED_BY]->(ca:Chunk) MATCH (b)-[:SUPPORTED_BY]->(cb:Chunk)
                MATCH (pa:Paper)-[]->(a) MATCH (pb:Paper)-[]->(b)
+               WHERE $scope IS NULL OR (pa.id IN $scope AND pb.id IN $scope)
                RETURN type(x) AS relation, x.score AS score, a.text AS statement_a, pa.title AS paper_a, ca.id AS chunk_a,
                       b.text AS statement_b, pb.title AS paper_b, cb.id AS chunk_b
-               ORDER BY relation, score DESC""", {"ids": ids}, read_only=True)
+               ORDER BY relation, score DESC""", {"ids": ids, "scope": self.scope}, read_only=True)
         by_paper: dict[str, list] = {}
         for s in sorted(statements, key=lambda s: -s["relevance"]):
             by_paper.setdefault(s["paper_title"], []).append(s)
@@ -220,11 +260,14 @@ class ResearchTools:
         # 1. Limitations / future work that no other paper addresses (recurring ones rank higher)
         rows = self.store.query(
             """MATCH (p:Paper)-[:HAS_LIMITATION]->(l:Limitation)-[:SUPPORTED_BY]->(c:Chunk)
-               OPTIONAL MATCH (l)-[a:ADDRESSED_BY]->(addr)<-[]-(ap:Paper)
+               WHERE $scope IS NULL OR p.id IN $scope
+               OPTIONAL MATCH (l)-[a:ADDRESSED_BY]->(addr)<-[]-(ap:Paper) WHERE $scope IS NULL OR ap.id IN $scope
                OPTIONAL MATCH (l)-[:SIMILAR_TO]-(l2:Limitation)<-[:HAS_LIMITATION]-(p2:Paper)-[:HAS_CHUNK]->(c2:Chunk)<-[:SUPPORTED_BY]-(l2)
+               WHERE $scope IS NULL OR p2.id IN $scope
                RETURN l.id AS id, l.text AS text, l.kind AS kind, p.title AS paper_title, c.id AS chunk_id, c.page AS page,
                       collect(DISTINCT {text: addr.text, paper: ap.title}) AS addressed_by,
-                      collect(DISTINCT {text: l2.text, paper: p2.title, chunk_id: c2.id, page: c2.page}) AS recurring""", read_only=True)
+                      collect(DISTINCT {text: l2.text, paper: p2.title, chunk_id: c2.id, page: c2.page}) AS recurring""",
+            {"scope": self.scope}, read_only=True)
         seen_recurring: set[str] = set()
         for r in rows:
             if r["id"] in seen_recurring:
@@ -252,8 +295,9 @@ class ResearchTools:
                 """MATCH (a)-[x:CONTRADICTS]->(b) WHERE x.score >= $min
                    MATCH (pa:Paper)-[]->(a)-[:SUPPORTED_BY]->(ca:Chunk)
                    MATCH (pb:Paper)-[]->(b)-[:SUPPORTED_BY]->(cb:Chunk)
+                   WHERE $scope IS NULL OR (pa.id IN $scope AND pb.id IN $scope)
                    RETURN a.text AS a, b.text AS b, pa.title AS pa, pb.title AS pb, ca.id AS ca, cb.id AS cb, ca.page AS pga, cb.page AS pgb, x.score AS score
-                   ORDER BY score DESC LIMIT 30""", {"min": MIN_CONFLICT_SCORE}, read_only=True):
+                   ORDER BY score DESC LIMIT 30""", {"min": MIN_CONFLICT_SCORE, "scope": self.scope}, read_only=True):
             pairs.setdefault(frozenset((r["pa"], r["pb"])), []).append(r)
         for conflicts in pairs.values():
             top = conflicts[0]
@@ -277,12 +321,13 @@ class ResearchTools:
             """MATCH (p1:Paper)-[r1:USES_METHOD]->(m:Method), (p2:Paper)-[r2:USES_DATASET]->(d:Dataset)
                WHERE NOT (m)<-[:USES_METHOD]-(:Paper)-[:USES_DATASET]->(d)
                  AND p1 <> p2 AND (p1)-[:USES_DATASET]->(:Dataset)<-[:USES_DATASET]-(p2)
+                 AND ($scope IS NULL OR (p1.id IN $scope AND p2.id IN $scope))
                WITH m, d, collect(DISTINCT p1.title) AS mp, collect(DISTINCT p2.title) AS dp,
                     collect(DISTINCT {chunk_id: r1.chunk_id, paper: p1.title, quote: r1.quote})[0..1] AS me,
                     collect(DISTINCT {chunk_id: r2.chunk_id, paper: p2.title, quote: r2.quote})[0..1] AS de
                WHERE size(mp) >= 2 OR size(dp) >= 2
                RETURN m.name AS method, d.name AS dataset, size(mp) AS method_papers, size(dp) AS dataset_papers, me, de
-               ORDER BY method_papers + dataset_papers DESC LIMIT 16""", read_only=True)
+               ORDER BY method_papers + dataset_papers DESC LIMIT 16""", {"scope": self.scope}, read_only=True)
         combos = [c for c in combos if valid_entity(c["method"]) and valid_entity(c["dataset"])][:4]
         for c in combos:
             gaps.append({
@@ -327,6 +372,9 @@ class ResearchTools:
     # ------------------------------------------------------------------ escape hatch
     def graph_query(self, cypher: str) -> dict:
         """Read-only Cypher for custom multi-hop questions. Writes are rejected by FalkorDB's read-only mode."""
+        if self.scope:
+            return {"error": "graph_query reads the whole library, so it is unavailable while the investigation is "
+                             "limited to selected papers. Use the other tools."}
         if re.search(r"\b(CREATE|MERGE|DELETE|SET|REMOVE|DROP|CALL\s+db\.idx\.\w+\.create)\b", cypher, re.I):
             return {"error": "Only read-only queries are allowed."}
         if not re.search(r"\bLIMIT\s+\d+", cypher, re.I):

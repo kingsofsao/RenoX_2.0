@@ -1,0 +1,52 @@
+# Production stack: web (nginx + React) -> backend (FastAPI) -> FalkorDB.
+# Only the web container is published; the API and the database are reachable on the internal
+# network only. Put a TLS terminator (Caddy, a cloud load balancer, or nginx + certbot) in front of
+# port 8080 and set ALLOWED_ORIGINS to your https:// site origin.
+#
+#   cp backend/.env.example backend/.env        # then edit it (see the README "Deployment" section)
+#   export FALKORDB_PASSWORD=$(openssl rand -hex 32)
+#   docker compose up -d --build
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    restart: unless-stopped
+    environment:
+      # Password-protected, append-only persistence. Never publish this port.
+      REDIS_ARGS: "--requirepass ${FALKORDB_PASSWORD:?set FALKORDB_PASSWORD} --appendonly yes"
+    volumes:
+      - falkordb-data:/var/lib/falkordb/data
+    networks: [internal]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      ENVIRONMENT: production
+      FALKORDB_URL: falkor://default:${FALKORDB_PASSWORD}@falkordb:6379
+      RESEARCHMIND_DATA_DIR: /data
+    volumes:
+      - app-data:/data
+    depends_on: [falkordb]
+    networks: [internal]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on: [backend]
+    networks: [internal]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+volumes:
+  falkordb-data:
+  app-data:
+
+networks:
+  internal:

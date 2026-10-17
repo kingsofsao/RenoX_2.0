@@ -17,6 +17,8 @@ os.environ["RESEARCHMIND_DATA_DIR"] = tempfile.mkdtemp(prefix="researchmind-test
 # Tests choose their LLM explicitly (mocks); backend/.env's provider must not leak in.
 # Live tests (test_ollama_live.py) construct OllamaLLM directly from LLM_MODEL / OLLAMA_BASE_URL.
 os.environ["LLM_PROVIDER"] = "none"
+# Most mocked tests exercise the offline plan; tests of the AI-required behaviour switch it on explicitly.
+os.environ["AI_REQUIRED"] = "false"
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -64,6 +66,29 @@ def ingested(store, sample_pdfs):
 
 
 @pytest.fixture(autouse=True)
+def fresh_limits():
+    """Rate limits are per process; give every test a clean slate."""
+    from app.ratelimit import get_limiters
+    get_limiters().reset()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def memory_accounts(request):
+    """Mocked tests get an in-memory user/session store; integration tests use the real FalkorDB one."""
+    if request.node.get_closest_marker("integration") or request.node.get_closest_marker("live_llm"):
+        yield None
+        return
+    from app import auth
+    from app.main import app
+    from researchmind.accounts import MemoryAccounts
+    accounts = MemoryAccounts()
+    app.dependency_overrides[auth.get_accounts] = lambda: accounts
+    yield accounts
+    app.dependency_overrides.pop(auth.get_accounts, None)
+
+
+@pytest.fixture(autouse=True)
 def memory_registry(request):
     """Mocked tests get an in-memory project registry; integration tests use the real FalkorDB one."""
     if request.node.get_closest_marker("integration") or request.node.get_closest_marker("live_llm"):
@@ -71,8 +96,15 @@ def memory_registry(request):
         return
     from app import database
     from app.main import app
+    from app.routes import projects as project_routes
     from researchmind.projects import MemoryRegistry
     registry = MemoryRegistry()
     app.dependency_overrides[database.get_registry] = lambda: registry
+
+    def no_database(project):  # project listings count papers; mocked tests have no database
+        raise database.DatabaseUnavailable("not_configured")
+    original = project_routes.store_for
+    project_routes.store_for = no_database
     yield registry
+    project_routes.store_for = original
     app.dependency_overrides.pop(database.get_registry, None)

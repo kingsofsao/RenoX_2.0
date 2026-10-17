@@ -15,7 +15,6 @@ class BackendHealth(BaseModel):
 
 class DatabaseHealth(BaseModel):
     status: Literal["connected", "unavailable", "not_configured"]
-    graph: str
     latency_ms: float | None
     message: str | None
 
@@ -27,15 +26,13 @@ class LLMStatus(BaseModel):
     reachable: bool | None
     model_available: bool | None
     message: str
-    base_url: str | None = None
-    installed_models: list[str] = []
-    version: str | None = None
 
 
 class ConfigInfo(BaseModel):
     max_upload_mb: int
     max_files_per_upload: int
     llm_configured: bool
+    ai_required: bool = True
     embedding_model: str | None
     llm: LLMStatus
 

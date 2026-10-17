@@ -32,4 +32,4 @@ def test_mcp_server_stdio(ingested, store):
     names, payload = asyncio.run(run())
     assert names == {"list_papers", "search_evidence", "get_paper", "explore_entity", "find_related_papers",
                      "compare_claims", "find_research_gaps", "get_evidence", "graph_query"}
-    assert payload["contradictions"]
+    assert payload["statements_by_paper"] and payload["contradictions"] == []  # papers are never linked

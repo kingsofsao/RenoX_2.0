@@ -1,6 +1,9 @@
-"""Runs investigations in a bounded worker pool, scoped to one project each, and saves them.
+"""Runs investigations in a bounded worker pool, each over one paper of one user's project, and saves them.
 
-Investigations take seconds (offline) to minutes (local LLM), so they run in background threads.
+Investigations are AI-driven (AI_REQUIRED, default on): the LLM reads evidence that the agent
+retrieves from the paper's knowledge graph through the MCP tools. If the AI service is not
+configured or fails, the investigation fails with a clear message instead of silently switching to
+an extractive offline report. Investigations take seconds to minutes, so they run in background threads.
 Live progress is kept in memory for polling; the investigation record (question, status, report,
 citations, structured result, timestamps) is saved to the project registry when it is submitted,
 when it starts and when it finishes, so saved results survive restarts.
@@ -25,8 +28,10 @@ from researchmind.agent import Investigator
 from researchmind.config import get_settings
 from researchmind.graph import GraphStore
 from researchmind.investigation import build_structured
+from researchmind.llm import LLMUnavailable
 from researchmind.projects import BaseRegistry, Project, encode_json
 
+from ..config import get_api_settings
 from ..database import reset_store
 
 log = logging.getLogger("researchmind.api.investigations")
@@ -36,6 +41,25 @@ MAX_EVENTS = 300
 
 class InvestigationBusy(Exception):
     """All investigation workers are in use."""
+
+
+class UserBusy(InvestigationBusy):
+    """This user already has the maximum number of investigations running."""
+
+
+class AIUnavailable(Exception):
+    """The AI service is not configured, so an AI investigation cannot start."""
+
+
+AI_NOT_CONFIGURED = ("The AI service is not configured on this server, so investigations cannot run. "
+                     "Please contact the administrator.")
+# What users see when the model fails mid-run; the technical detail goes to the server log only.
+AI_ERRORS = {
+    "timeout": "The AI model took too long to answer. Please try again; a shorter, more specific question helps.",
+    "malformed": "The AI model did not return a usable, cited answer. Please try again or rephrase the question.",
+    "refusal": "The AI model declined to answer this question. Please rephrase it.",
+}
+AI_ERROR_DEFAULT = "The AI service is unavailable right now. Please try again in a few minutes."
 
 
 def _now() -> str:
@@ -50,6 +74,9 @@ class Job:
     project_id: str = "default"
     owner_id: str = "local"
     requirements: str | None = None
+    paper_ids: list[str] | None = None  # the one paper analysed
+    paper_title: str | None = None
+    language: str = "en"
     provider: str | None = None
     model: str | None = None
     created_at: str = field(default_factory=_now)
@@ -88,6 +115,8 @@ class Job:
                 "finished_at": self.finished_at, "duration_seconds": self.duration_seconds,
                 "error_code": (self.error or {}).get("code"), "error_message": (self.error or {}).get("message"),
                 "result_json": encode_json(self.result) if self.result is not None else None,
+                "paper_ids_json": encode_json(self.paper_ids) if self.paper_ids else None,
+                "paper_title": self.paper_title, "language": self.language,
                 "progress_json": encode_json(self.progress)}
 
     def save(self) -> None:
@@ -101,13 +130,14 @@ class Job:
     def to_dict(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "question": self.question, "status": self.status, "mode": self.mode,
                 "llm_configured": self.llm_configured, "provider": self.provider, "model": self.model,
-                "requirements": self.requirements, "created_at": self.created_at, "started_at": self.started_at,
-                "finished_at": self.finished_at, "duration_seconds": self.duration_seconds,
+                "requirements": self.requirements, "paper_ids": self.paper_ids, "paper_title": self.paper_title,
+                "language": self.language, "created_at": self.created_at,
+                "started_at": self.started_at, "finished_at": self.finished_at, "duration_seconds": self.duration_seconds,
                 "progress": list(self.progress), "result": self.result, "error": self.error}
 
     def summary(self) -> dict:
         return {"id": self.id, "project_id": self.project_id, "question": self.question, "status": self.status, "mode": self.mode,
-                "provider": self.provider, "model": self.model,
+                "provider": self.provider, "model": self.model, "paper_title": self.paper_title,
                 "created_at": self.created_at, "duration_seconds": self.duration_seconds}
 
 
@@ -123,16 +153,24 @@ class InvestigationManager:
         self._lock = threading.Lock()
 
     def submit(self, question: str, store: GraphStore, use_llm: bool = True, requirements: str | None = None,
-               project: Project | None = None, registry: BaseRegistry | None = None) -> Job:
+               project: Project | None = None, registry: BaseRegistry | None = None,
+               paper_ids: list[str] | None = None, paper_title: str | None = None, language: str = "en",
+               owner_id: str | None = None) -> Job:
+        api, s = get_api_settings(), get_settings()
+        if api.ai_required and use_llm and not s.has_llm:
+            raise AIUnavailable(AI_NOT_CONFIGURED)
+        owner = owner_id or (project.owner_id if project else "local")
         with self._lock:
-            active = sum(1 for j in self._jobs.values() if j.status in ("queued", "running"))
-            if active >= self.max_concurrent:
+            active = [j for j in self._jobs.values() if j.status in ("queued", "running")]
+            if sum(j.owner_id == owner for j in active) >= api.investigations_per_user:
+                raise UserBusy()
+            if len(active) >= self.max_concurrent:
                 raise InvestigationBusy()
-            s = get_settings()
             job = Job(id="inv_" + uuid.uuid4().hex[:12], question=question, use_llm=use_llm, requirements=requirements,
+                      paper_ids=paper_ids or None, paper_title=paper_title, language=language,
                       llm_configured=s.has_llm, registry=registry,
-                      project_id=project.id if project else "default", owner_id=project.owner_id if project else "local")
-            if use_llm and s.has_llm:  # expected provider; confirmed (or cleared on fallback) when the run finishes
+                      project_id=project.id if project else "default", owner_id=owner)
+            if use_llm and s.has_llm:  # expected provider; confirmed when the run finishes
                 job.mode, job.provider = "llm", s.resolved_provider
                 job.model = s.llm_model or (s.anthropic_model if job.provider == "anthropic" else None)
             self._jobs[job.id] = job
@@ -151,6 +189,12 @@ class InvestigationManager:
             return None  # never across projects
         return job
 
+    def forget_project(self, project_id: str) -> None:
+        """Drop in-memory results of a deleted project, so nothing of it stays reachable."""
+        with self._lock:
+            for k in [k for k, j in self._jobs.items() if j.project_id == project_id]:
+                del self._jobs[k]
+
     def running(self, project_id: str) -> bool:
         return any(j.project_id == project_id and j.status in ("queued", "running") for j in self._jobs.values())
 
@@ -162,31 +206,37 @@ class InvestigationManager:
         job.started_at, job.status = _now(), "running"
         job.save()
         try:
-            investigator = self.investigator_factory(store, use_llm=job.use_llm, time_budget_s=self.time_budget_s)
+            investigator = self.investigator_factory(store, use_llm=job.use_llm, time_budget_s=self.time_budget_s,
+                                                     paper_ids=job.paper_ids, language=job.language,
+                                                     require_llm=get_api_settings().ai_required and job.use_llm)
+            job.add_event({"type": "status", "message": f"Analysing one paper: {job.paper_title or 'selected paper'}"})
             job.mode, job.provider, job.model = investigator.mode, investigator.provider, getattr(investigator.llm, "model", None)
-            if job.use_llm and not investigator.llm:
-                job.add_event({"type": "status", "message": "No LLM configured - using the offline investigation plan"})
-            elif investigator.llm:
-                job.add_event({"type": "status", "message": f"Using LLM {job.provider} / {job.model}"})
+            if investigator.llm:
+                job.add_event({"type": "status", "message": f"AI model: {job.model or job.provider}"})
             result = investigator.run(job.question, on_event=job.add_event, requirements=job.requirements)
             job.add_event({"type": "status", "message": "Building structured report and verifying sources"})
             structured = build_structured(result, lookup=lambda ids: investigator.tools.get_evidence(ids)["evidence"],
-                                          corpus_size=len(store.list_papers()))
+                                          corpus_size=len(investigator.tools.list_papers()["papers"]),
+                                          scoped=True, paper_ids=job.paper_ids)
             job.mode = result.mode
             if result.mode == "offline":
                 job.provider, job.model = None, None
             job.result = {"mode": result.mode, "report_markdown": result.report_markdown, "steps": result.steps,
                           "warnings": result.warnings, **structured}
             job.status = "completed"
+        except LLMUnavailable as e:
+            log.warning("Investigation %s: AI service failed (%s): %s", job.id, e.code, e)  # detail stays in the log
+            message = AI_NOT_CONFIGURED if e.code == "not_configured" else AI_ERRORS.get(e.code, AI_ERROR_DEFAULT)
+            job.status, job.error = "failed", {"code": "ai_unavailable", "message": message}
         except (RedisConnectionError, RedisTimeoutError) as e:
-            log.warning("FalkorDB connection lost during investigation %s: %s", job.id, e)
+            log.warning("FalkorDB connection lost during investigation %s: %s", job.id, e.__class__.__name__)
             reset_store()
             job.status, job.error = "failed", {"code": "database_unavailable",
                                                "message": "Lost connection to the graph database during the investigation. Please retry."}
         except Exception:
             log.exception("Investigation %s failed", job.id)  # details stay in the server log
             job.status, job.error = "failed", {"code": "investigation_failed",
-                                               "message": "The investigation failed due to an internal error. Check the server logs for details."}
+                                               "message": "The investigation failed due to an internal error. Please try again."}
         finally:
             job.finished_at = _now()
             job.duration_seconds = round(time.monotonic() - job._t0, 2)
@@ -204,7 +254,6 @@ def get_manager() -> InvestigationManager:
     global _manager
     with _manager_lock:
         if _manager is None:
-            from ..config import get_api_settings
             s = get_api_settings()
             _manager = InvestigationManager(s.investigation_max_concurrent, s.investigation_timeout_s)
         return _manager
@@ -222,7 +271,9 @@ def record_to_response(rec: dict) -> dict:
     return {"id": rec["id"], "project_id": rec["project_id"], "question": rec.get("question") or "",
             "status": rec.get("status") or "failed", "mode": rec.get("mode"),
             "llm_configured": bool(rec.get("use_llm")), "provider": rec.get("provider"), "model": rec.get("model"),
-            "requirements": rec.get("requirements"), "created_at": rec.get("created_at") or "",
+            "requirements": rec.get("requirements"), "paper_ids": load("paper_ids_json", None),
+            "paper_title": rec.get("paper_title"), "language": rec.get("language"),
+            "created_at": rec.get("created_at") or "",
             "started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
             "duration_seconds": rec.get("duration_seconds"), "progress": load("progress_json", []),
             "result": load("result_json", None), "error": error}

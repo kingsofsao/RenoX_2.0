@@ -1,10 +1,11 @@
-import { Link } from 'react-router-dom'
 import { Compass } from 'lucide-react'
-import { Button, EmptyState } from '../components/ui'
+import { ButtonLink, EmptyState } from '../components/ui'
+import { useI18n } from '../i18n/I18nProvider'
 
 export function NotFoundPage() {
+  const { t } = useI18n()
   return (
-    <EmptyState icon={<Compass className="h-6 w-6" />} title="Page not found" description="That page does not exist."
-      action={<Link to="/"><Button>Go to overview</Button></Link>} />
+    <EmptyState icon={<Compass className="h-6 w-6" />} title={t('notFound.title')} description={t('notFound.text')}
+      action={<ButtonLink to="/">{t('notFound.back')}</ButtonLink>} />
   )
 }

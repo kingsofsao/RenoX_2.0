@@ -1,19 +1,206 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter";
 
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+/* Dark mode is a class on <html> (set by ThemeProvider from the user's setting or the OS). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Design tokens. Components use only these semantic colours (bg-surface, text-fg, border-line,
+ * bg-brand, ...), so every screen switches between the light and dark theme from this one place.
+ * Palette: black, white and a precise "motorsport" blue.
+ */
+:root {
+  --canvas: #f4f5f7;
+  --surface: #ffffff;
+  --surface-2: #f7f8fa;
+  --surface-3: #eef0f3;
+  --line: #e3e6eb;
+  --line-strong: #cdd2da;
+  --fg: #0b0d11;
+  --fg-muted: #4b5361;
+  --fg-subtle: #7b8494;
+  --brand: #1c69d4;
+  --brand-hover: #1559b8;
+  --brand-strong: #0f4c9e;
+  --brand-soft: #e8f0fc;
+  --brand-fg: #0f4fa8;
+  --brand-ring: rgb(28 105 212 / 0.35);
+  --ok: #138a52;
+  --ok-soft: #e7f6ee;
+  --ok-fg: #0d6b3f;
+  --warn: #b26a00;
+  --warn-soft: #fff4e0;
+  --warn-fg: #8a5200;
+  --bad: #c62828;
+  --bad-soft: #fdecec;
+  --bad-fg: #a31d1d;
+  --accent: #5b4bc4;        /* model hypotheses and the user's own requirements [R] */
+  --accent-soft: #efedfb;
+  --accent-fg: #4536a8;
+  --shadow: 0 1px 2px rgb(11 13 17 / 0.05), 0 1px 3px rgb(11 13 17 / 0.06);
+  --shadow-lg: 0 10px 30px -12px rgb(11 13 17 / 0.25);
+  --sidebar: #050608;
+  --sidebar-2: #101216;
+  --sidebar-line: #1d2027;
+  --graph-paper: #1c69d4;
+  --graph-method: #0b0d11;
+  --graph-dataset: #7b8494;
+  color-scheme: light;
+}
+
+.dark {
+  --canvas: #07080a;
+  --surface: #101216;
+  --surface-2: #15181d;
+  --surface-3: #1c2027;
+  --line: #242831;
+  --line-strong: #343a45;
+  --fg: #f2f4f7;
+  --fg-muted: #a7afbd;
+  --fg-subtle: #7d8696;
+  --brand: #2f7ff0;
+  --brand-hover: #4b92f5;
+  --brand-strong: #6aa6f8;
+  --brand-soft: rgb(47 127 240 / 0.14);
+  --brand-fg: #8fbcff;
+  --brand-ring: rgb(47 127 240 / 0.45);
+  --ok: #2fbf78;
+  --ok-soft: rgb(47 191 120 / 0.13);
+  --ok-fg: #7be0ac;
+  --warn: #f0a63a;
+  --warn-soft: rgb(240 166 58 / 0.13);
+  --warn-fg: #f6c77d;
+  --bad: #f05252;
+  --bad-soft: rgb(240 82 82 / 0.13);
+  --bad-fg: #ff9b9b;
+  --accent: #9a8cf5;
+  --accent-soft: rgb(154 140 245 / 0.14);
+  --accent-fg: #c3baff;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 16px 40px -12px rgb(0 0 0 / 0.7);
+  --sidebar: #000000;
+  --sidebar-2: #0c0d10;
+  --sidebar-line: #1a1d23;
+  --graph-paper: #2f7ff0;
+  --graph-method: #e6e9ee;
+  --graph-dataset: #7d8696;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans",
+    "Noto Sans Devanagari", "Noto Sans Tamil", "Noto Sans SC", "Noto Sans JP", "Noto Sans Arabic", sans-serif;
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-fg: var(--brand-fg);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-fg: var(--ok-fg);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-fg: var(--warn-fg);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-bad-fg: var(--bad-fg);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-2: var(--sidebar-2);
+  --color-sidebar-line: var(--sidebar-line);
+  --shadow-card: var(--shadow);
+  --shadow-pop: var(--shadow-lg);
+  --animate-fade-up: fade-up 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade-in: fade-in 0.25s ease-out both;
+  --animate-scale-in: scale-in 0.18s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-indeterminate: indeterminate 1.6s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.4s linear infinite;
 }
 
 html {
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 body {
-  background-color: var(--color-slate-50);
-  color: var(--color-slate-900);
+  background-color: var(--canvas);
+  color: var(--fg);
+  font-feature-settings: "cv11", "ss01";
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-@keyframes progress {
+::selection {
+  background: var(--brand-soft);
+  color: var(--fg);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes indeterminate {
   0% { transform: translateX(-100%); }
-  100% { transform: translateX(300%); }
+  100% { transform: translateX(320%); }
+}
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+
+/* Loading placeholder */
+.skeleton {
+  border-radius: 0.375rem;
+  background: linear-gradient(90deg, var(--surface-3) 25%, var(--surface-2) 50%, var(--surface-3) 75%);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+/* Thin, theme-aware scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+/* React Flow follows the theme */
+.react-flow {
+  --xy-background-color: var(--surface);
+  --xy-node-color: var(--fg);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--surface-3);
+  --xy-controls-button-color: var(--fg);
+  --xy-controls-button-border-color: var(--line);
+  --xy-minimap-background-color: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

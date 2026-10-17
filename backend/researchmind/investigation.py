@@ -117,7 +117,11 @@ def _side(sources: Sources, text: str, chunk_id: str, paper_title: str | None) -
             "page": src["page"], "citation": n}
 
 
-def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_size: int | None = None) -> dict:
+def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_size: int | None = None,
+                     scoped: bool = False, paper_ids: list[str] | None = None) -> dict:
+    """corpus_size: papers the investigation could draw on; scoped: they are papers the user selected.
+    paper_ids: with exactly one paper, that paper is relevant by definition (the user chose it), and an
+    answer citing verified passages of it counts as evidence even when no passage matched the question closely."""
     sources = Sources(result, lookup)
 
     compare = _outputs(result, "compare_claims")
@@ -130,6 +134,9 @@ def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_
                   if (s.get("relevance") or 0) >= MIN_RELEVANCE]
     hits = [h for x in search for h in x.get("results", []) if (h.get("score") or 0) >= MIN_RELEVANCE]
     relevant_papers = {s.get("paper_id") for s in statements} | {h.get("paper_id") for h in hits}
+    single = paper_ids[0] if paper_ids and len(paper_ids) == 1 else None
+    if single:
+        relevant_papers.add(single)
     relevant_texts = {_norm(s.get("text", "")) for s in statements}
 
     def touches_topic(x: dict) -> bool:
@@ -149,7 +156,7 @@ def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_
                    [(m["entity"], m["type"], q.get("paper_id"), q.get("title"), q.get("chunk_id"))
                     for x in explore for m in x.get("matches", []) for q in m.get("papers", [])
                     if q.get("paper_id") in relevant_papers])
-    evidence_found = bool(statements or hits)
+    evidence_found = bool(statements or hits or (single and result.mode == "llm" and result.references))
     gaps_in = result.gaps if evidence_found else []
 
     # Verify every chunk id the structured sections may cite, in one batched pass.
@@ -269,7 +276,8 @@ def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_
                                "in the knowledge graph and were left out.")
     confidence = assess_confidence(mode=result.mode, findings=findings, comparisons=comparisons, sources=source_list,
                                    papers=len(papers), corpus_size=corpus_size, unverified=len(unverified),
-                                   narrative=section(result.report_markdown, "Confidence"), evidence_found=evidence_found)
+                                   narrative=section(result.report_markdown, "Confidence"), evidence_found=evidence_found,
+                                   scoped=scoped)
     return {
         "evidence_found": evidence_found,
         "summary": summarize(result.report_markdown, findings) if evidence_found else NO_EVIDENCE,
@@ -297,27 +305,33 @@ def summarize(markdown: str, findings: list[dict]) -> str:
 
 
 def assess_confidence(*, mode: str, findings: list, comparisons: list, sources: list, papers: int,
-                      corpus_size: int | None, unverified: int, narrative: str = "", evidence_found: bool = True) -> dict:
+                      corpus_size: int | None, unverified: int, narrative: str = "", evidence_found: bool = True,
+                      scoped: bool = False) -> dict:
     conflicts = sum(1 for c in comparisons if c["kind"] == "contradiction")
+    # Analysing one selected paper is not penalised for lacking a second paper.
+    min_papers = 1 if scoped and corpus_size == 1 else 2
     reasons, uncertainties = [], []
     reasons.append(f"{len(sources)} verified evidence passage(s) from {papers} paper(s)"
-                   + (f" out of {corpus_size} ingested" if corpus_size else "") + ".")
+                   + (f" out of {corpus_size} {'selected' if scoped else 'ingested'}" if corpus_size else "") + ".")
     if mode == "offline":
         uncertainties.append("Offline mode: evidence was ranked by similarity and graph structure; no language model reasoned over it.")
     if conflicts:
         uncertainties.append(f"{conflicts} cross-paper conflict(s) detected; the papers disagree on part of this question.")
     if unverified:
         uncertainties.append(f"{unverified} citation(s) in the narrative did not match stored evidence and are marked [unverified].")
-    if corpus_size is not None and corpus_size < 5:
+    if scoped:
+        uncertainties.append(f"Limited to the {corpus_size} selected paper(s); other papers in the library were not consulted.")
+    elif corpus_size is not None and corpus_size < 5:
         uncertainties.append(f"Small corpus ({corpus_size} paper(s)); conclusions and gaps reflect only these papers.")
     uncertainties.append("Candidate gaps are hypotheses from the ingested papers, not confirmed novel directions.")
 
     if not evidence_found:
         level = "low"
         reasons.append("No ingested paper contains evidence relevant to this question.")
-    elif not findings or papers < 2 or len(sources) < 3:
+    elif not findings or papers < min_papers or len(sources) < 3:
         level = "low"
-        reasons.append("Little direct evidence or evidence from fewer than two papers.")
+        reasons.append("Little direct evidence or evidence from fewer than two papers." if min_papers > 1
+                       else "Little direct evidence in the selected paper.")
     elif mode == "llm" and papers >= 3 and len(sources) >= 6 and not unverified and not conflicts:
         level = "high"
         reasons.append("Consistent evidence across three or more papers, all citations verified.")

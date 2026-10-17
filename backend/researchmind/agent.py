@@ -7,8 +7,14 @@ LLM mode, by provider:
 - anthropic: Claude plans and calls the graph tools in a tool-use loop, then writes a cited report.
 Citations are verified against the graph afterwards in both cases.
 
-Offline mode (no API key): a fixed investigation plan over the same tools, producing an
-extractive, fully cited report. Useful for demos without credentials and for tests.
+Offline mode: a fixed investigation plan over the same tools, producing an extractive, fully
+cited report. Used only by the command-line tools and tests: the web API runs with
+require_llm=True, so a missing or failing AI model fails the investigation instead of
+silently replacing the AI answer with an extractive one.
+
+Language: with `language` set (e.g. "de"), the model writes the report in that language while
+keeping section headings, citation markers and "Hypothesis:" prefixes in English, because the
+structured report is parsed from them (the web UI translates the headings).
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from typing import Callable
 
 import anthropic
 
+from .accounts import LANGUAGES, NATIVE_NAMES
 from .graph import GraphStore
 from .grounded import GroundedInvestigation, NoRelevantEvidence
 from .llm import LLMUnavailable, get_llm
@@ -34,17 +41,18 @@ log = logging.getLogger(__name__)
 Event = dict
 MAX_TOOL_RESULT_CHARS = 12000
 
-SYSTEM_PROMPT = """You are ResearchMind, a scientific research investigator. You answer research questions by investigating a FalkorDB knowledge graph of ingested papers, never from memory.
+SYSTEM_PROMPT = """You are ResearchMind, a scientific research investigator. You answer a research question about ONE paper by investigating that paper's FalkorDB knowledge graph, never from memory.
 
-The graph links papers to methods, datasets, claims, findings and limitations, and every statement is tied to an evidence chunk (a page-level passage) with an id like p_1a2b3c4d5e6f:c003. Cross-paper edges mark similar statements, contradictions, and limitations that another paper addresses.
+The graph links the paper to its methods, datasets, claims, findings and limitations, and every statement is tied to an evidence chunk (a page-level passage) with an id like p_1a2b3c4d5e6f:c003. The tools only return this paper's data.
 
 How to investigate:
-- Start with list_papers, then gather evidence from several angles: search_evidence for passages, explore_entity to traverse from methods/datasets to the papers and results connected to them, compare_claims to find agreement and contradiction across papers, find_related_papers for multi-hop connections, and find_research_gaps for candidate gaps. Use graph_query only for questions the other tools cannot answer.
-- Investigate across multiple papers. Follow up on contradictions and limitations rather than stopping at the first relevant passage.
+- Start with list_papers and get_paper, then gather evidence from several angles: search_evidence for passages, explore_entity to traverse from a method or dataset to the results and limitations connected to it, compare_claims to see how the paper's claims and findings relate to the question, and find_research_gaps for gaps the paper's limitations and future work leave open.
+- Follow up on limitations and caveats rather than stopping at the first relevant passage.
 - Stop investigating once additional tool calls stop changing your conclusions.
 
 How to write the final report (Markdown):
-- Sections: "## Answer" (direct answer in 2-4 sentences), "## Evidence" (the key results, grouped by theme, across papers), "## Agreements and Conflicts", "## Limitations of the Evidence", "## Candidate Research Gaps" (each gap: what is missing, why the evidence suggests it, and a concrete study that would close it), "## Confidence".
+- Sections: "## Answer" (direct answer in 2-4 sentences), "## Evidence" (the key results, grouped by theme), "## Methods, data and results", "## Limitations of the Evidence", "## Candidate Research Gaps" (each gap starts with "Hypothesis:": what is missing, why the evidence suggests it, and a concrete study that would close it), "## Not covered by the evidence", "## Confidence".
+- Never compare with or refer to other papers: only this paper was provided.
 - Cite every factual sentence with the evidence chunk id in square brackets, e.g. [p_1a2b3c4d5e6f:c003]. Cite only chunk ids that appeared in tool results. Several citations go in one bracket separated by commas.
 - Present gaps as candidates supported by the ingested papers only, not as established facts. If the corpus cannot answer the question, say so plainly.
 - Do not include a references list; it is generated automatically from your citations."""
@@ -59,8 +67,12 @@ class Investigator:
     """
 
     def __init__(self, store: GraphStore, llm=None, use_llm: bool = True, max_turns: int | None = None,
-                 tools: ResearchTools | None = None, transport: str | None = None, time_budget_s: float | None = None):
-        self.tools = tools or ResearchTools(store)
+                 tools: ResearchTools | None = None, transport: str | None = None, time_budget_s: float | None = None,
+                 paper_ids: list[str] | None = None, language: str | None = None, require_llm: bool = False):
+        # paper_ids limits the investigation to those papers; None investigates the whole library.
+        self.tools = tools or ResearchTools(store, paper_ids=paper_ids)
+        self.language = language if language in LANGUAGES else "en"
+        self.require_llm = require_llm  # True (web API): never fall back to the offline plan
         self.store = store
         self.llm = (llm or get_llm()) if use_llm else None
         self.max_turns = max_turns if max_turns is not None else int(os.getenv("AGENT_MAX_TURNS", "14"))
@@ -78,6 +90,49 @@ class Investigator:
     def provider(self) -> str | None:
         return getattr(self.llm, "provider", "anthropic") if self.llm else None
 
+    @property
+    def scope(self) -> list[str] | None:
+        """The papers this investigation is limited to; None means the whole library."""
+        return getattr(self.tools, "scope", None)
+
+    def scope_note(self) -> str:
+        """Tells the model which papers it is analysing when the investigation is limited to selected papers."""
+        if not self.scope:
+            return ""
+        papers = self.tools.list_papers()["papers"]
+        titles = "; ".join(f"{p.get('title') or p['id']} ({p['id']})" for p in papers)
+        return (f"\n\nScope: analyse ONLY the {len(papers)} selected paper(s): {titles}. The tools return evidence from "
+                "these papers only. Do not refer to or speculate about other papers in the user's library.")
+
+    @property
+    def language_name(self) -> str:
+        return f"{LANGUAGES[self.language]} ({NATIVE_NAMES[self.language]})"
+
+    def language_rule(self) -> str:
+        """System-prompt rule for the report language (small models follow the system prompt most reliably)."""
+        if self.language == "en":
+            return ""
+        return (f"\n\nOUTPUT LANGUAGE: {self.language_name}. Write every sentence of the report in {LANGUAGES[self.language]}, "
+                "even though the sources and these instructions are in English. Only the Markdown section headings, the "
+                "citation markers and the word \"Hypothesis:\" stay exactly as given in English.")
+
+    def language_note(self) -> str:
+        """Final reminder in the user prompt, keeping the parts the report parser relies on in English."""
+        if self.language == "en":
+            return ""
+        return (f"\n\nLanguage: write all report text in {self.language_name}. Keep the Markdown section headings "
+                "exactly as specified in English, keep every citation marker exactly as given, and start hypotheses "
+                f"with the English word \"Hypothesis:\". Answer in {LANGUAGES[self.language]} now.")
+
+    def _fallback(self, question: str, result: InvestigationResult, on_event, warning: str, code: str = "unavailable") -> None:
+        """The AI could not produce the report: fail (web API) or run the offline plan (CLI, tests)."""
+        if self.require_llm:
+            raise LLMUnavailable(warning, code)
+        result.warnings.append(warning + " Showing the offline report instead.")
+        on_event({"type": "status", "message": "AI unavailable - switching to the offline plan"})
+        result.mode = "offline"
+        self._run_offline(question, result, on_event)
+
     def _out_of_time(self) -> bool:
         return self._deadline is not None and time.monotonic() >= self._deadline
 
@@ -89,9 +144,15 @@ class Investigator:
         self._deadline = time.monotonic() + self.time_budget_s if self.time_budget_s else None
         result = InvestigationResult(question=question, mode=self.mode, provider=self.provider,
                                      model=getattr(self.llm, "model", None), requirements=requirements or None)
-        if not self.store.list_papers():
-            result.report_markdown = "# Investigation\n\nNo papers have been ingested yet. Ingest PDFs first."
-            result.warnings.append("Knowledge graph is empty.")
+        if self.require_llm and not self.llm:
+            raise LLMUnavailable("No AI model is configured.", "not_configured")
+        if not self.tools.list_papers()["papers"]:
+            if self.scope:
+                result.report_markdown = "# Investigation\n\nNone of the selected papers is in the library any more."
+                result.warnings.append("The selected papers were not found.")
+            else:
+                result.report_markdown = "# Investigation\n\nNo papers have been ingested yet. Ingest PDFs first."
+                result.warnings.append("Knowledge graph is empty.")
             return result
         if self.llm and hasattr(self.llm, "chat"):
             self._run_grounded(question, requirements, result, on_event)
@@ -99,15 +160,11 @@ class Investigator:
             try:
                 self._run_claude(question, result, on_event)
             except (anthropic.AuthenticationError, anthropic.PermissionDeniedError) as e:
-                result.warnings.append(f"Claude credentials rejected ({e.__class__.__name__}); ran offline investigation instead.")
-                on_event({"type": "status", "message": "Claude credentials rejected - switching to offline mode"})
-                result.mode = "offline"
-                self._run_offline(question, result, on_event)
+                self._fallback(question, result, on_event, f"Claude credentials rejected ({e.__class__.__name__}).")
+            except anthropic.APITimeoutError:
+                self._fallback(question, result, on_event, "Claude did not answer in time.", "timeout")
             except anthropic.APIError as e:
-                result.warnings.append(f"Claude API error ({e.__class__.__name__}: {e}); ran offline investigation instead.")
-                on_event({"type": "status", "message": f"Claude API error - switching to offline mode"})
-                result.mode = "offline"
-                self._run_offline(question, result, on_event)
+                self._fallback(question, result, on_event, f"Claude API error ({e.__class__.__name__}).")
         else:
             self._run_offline(question, result, on_event)
         self._ensure_coverage(question, result, on_event)
@@ -156,17 +213,16 @@ class Investigator:
             on_event({"type": "status", "message": "No stored evidence is relevant - the model was not asked"})
             result.warnings.append("No ingested paper contains evidence relevant to this question, so the LLM was not asked.")
             result.mode = "offline"
-            result.report_markdown = _no_evidence_report(question, self.store.list_papers())
+            result.report_markdown = _no_evidence_report(question, self.tools.list_papers()["papers"])
         except LLMUnavailable as e:
             log.warning("LLM %s unavailable (%s): %s", name, e.code, e)
-            result.warnings.append(f"LLM {name} unavailable ({e.code}: {e}). Showing the offline report instead.")
-            on_event({"type": "status", "message": f"LLM unavailable ({e.code}) - switching to the offline plan"})
-            result.mode = "offline"
-            self._run_offline(question, result, on_event)
+            self._fallback(question, result, on_event, f"LLM {name} unavailable ({e.code}: {e}).", e.code)
 
     # ------------------------------------------------------------------ Claude loop
     def _run_claude(self, question: str, result: InvestigationResult, on_event) -> None:
-        messages: list[dict] = [{"role": "user", "content": f"Research question: {question}"}]
+        messages: list[dict] = [{"role": "user",
+                                 "content": f"Research question: {question}{self.scope_note()}{self.language_note()}"}]
+        tool_specs = [t for t in TOOL_SPECS if t["name"] != "graph_query"] if self.scope else TOOL_SPECS
         on_event({"type": "status", "message": "Claude is planning the investigation"})
         final_text = ""
         for turn in range(self.max_turns + 1):
@@ -176,15 +232,13 @@ class Investigator:
                     result.warnings.append("The investigation time budget was reached; the report uses the evidence gathered so far.")
                     on_event({"type": "status", "message": "Time budget reached - writing the report"})
                 messages.append({"role": "user", "content": "Tool budget reached. Write the final report now using the evidence gathered."})
-            with_tools = {"tools": TOOL_SPECS} if not last_turn else {"tools": TOOL_SPECS, "tool_choice": {"type": "none"}}
+            with_tools = {"tools": tool_specs} if not last_turn else {"tools": tool_specs, "tool_choice": {"type": "none"}}
             response = self.llm.create(
-                max_tokens=16000, system=SYSTEM_PROMPT, messages=messages,
+                max_tokens=16000, system=SYSTEM_PROMPT + self.language_rule(), messages=messages,
                 output_config={"effort": self.effort}, **with_tools)
 
             if response.stop_reason == "refusal":
-                result.warnings.append("Claude declined this request; showing the offline investigation instead.")
-                result.mode = "offline"
-                self._run_offline(question, result, on_event)
+                self._fallback(question, result, on_event, "Claude declined this request.", "refusal")
                 return
             messages.append({"role": "assistant", "content": response.content})
             texts = [b.text for b in response.content if b.type == "text" and b.text.strip()]
@@ -213,9 +267,7 @@ class Investigator:
             break
 
         if not final_text.strip():
-            result.warnings.append("Claude returned no report text; showing the offline investigation instead.")
-            result.mode = "offline"
-            self._run_offline(question, result, on_event)
+            self._fallback(question, result, on_event, "Claude returned no report text.", "malformed")
             return
         on_event({"type": "status", "message": "Verifying citations"})
         result.report_markdown = f"# Investigation: {question}\n\n" + _strip_title(final_text)
@@ -256,8 +308,13 @@ class Investigator:
             return
 
         # Traverse from entities named in the question or the top evidence
-        entity_rows = self._call("graph_query", {"cypher": "MATCH (e) WHERE e:Method OR e:Dataset RETURN e.name AS name, labels(e)[0] AS label"},
-                                 result, on_event).get("rows", [])
+        if self.scope:  # graph_query is whole-library; list only the entities of the selected papers
+            entity_rows = self.store.query(
+                """MATCH (p:Paper)-[:USES_METHOD|USES_DATASET]->(e) WHERE p.id IN $scope
+                   RETURN DISTINCT e.name AS name, labels(e)[0] AS label""", {"scope": self.scope}, read_only=True)
+        else:
+            entity_rows = self._call("graph_query", {"cypher": "MATCH (e) WHERE e:Method OR e:Dataset RETURN e.name AS name, labels(e)[0] AS label"},
+                                     result, on_event).get("rows", [])
         named = [r["name"] for r in entity_rows if _mentions(r["name"], question)]
         if not named:
             top_text = " ".join(e["text"] for e in evidence[:3])
@@ -345,11 +402,12 @@ def _no_evidence_report(question: str, papers: list) -> str:
     return "\n".join([
         f"# Investigation: {question}", "",
         "## Answer", "",
-        f"The {len(papers)} ingested papers do not contain evidence relevant to this question: no passage or extracted "
-        f"statement reached the relevance threshold ({MIN_RELEVANCE}). ResearchMind answers only from the ingested papers, "
-        "so no answer is given.", "",
+        ("This paper does not" if len(papers) == 1 else f"The {len(papers)} papers do not")
+        + f" contain evidence relevant to this question: no passage or extracted statement reached the relevance "
+        f"threshold ({MIN_RELEVANCE}). ResearchMind answers only from the paper itself, so the AI model was not asked "
+        "to guess.", "",
         "## Confidence", "",
-        "Low: there is no supporting evidence in the corpus. Upload papers on this topic or rephrase the question.", ""])
+        "Low: there is no supporting evidence in this paper. Rephrase the question or analyse a paper on this topic.", ""])
 
 
 def _offline_report(question, papers, evidence, comparison, explored, details, gaps) -> str:

@@ -1,32 +1,17 @@
+import { RefreshCw } from 'lucide-react'
 import { useHealth } from '../hooks/HealthContext'
+import { useI18n } from '../i18n/I18nProvider'
 import { Alert, Button } from './ui'
 
-/** Explains why data is missing when the API or FalkorDB is not usable. Renders nothing when healthy. */
+/** Explains why data is missing when the service or database is not usable. Renders nothing when healthy. */
 export function DatabaseNotice() {
+  const { t } = useI18n()
   const { health, error, refresh } = useHealth()
-  const retry = <Button variant="secondary" onClick={refresh}>Retry</Button>
+  const retry = <Button variant="secondary" size="sm" onClick={refresh}><RefreshCw className="h-3.5 w-3.5" />{t('common.retry')}</Button>
 
-  if (error) {
-    return (
-      <Alert tone="error" title="Backend unreachable" action={retry}>
-        {error.message} Start it with <code className="rounded bg-red-100 px-1">uvicorn app.main:app --port 8000</code> from the backend folder.
-      </Alert>
-    )
-  }
-  if (!health) return null
-  if (health.database.status === 'not_configured') {
-    return (
-      <Alert tone="warning" title="FalkorDB is not configured" action={retry}>
-        Set <code className="rounded bg-amber-100 px-1">FALKORDB_URL</code> in <code className="rounded bg-amber-100 px-1">backend/.env</code> and restart the backend. Papers cannot be stored until then.
-      </Alert>
-    )
-  }
-  if (health.database.status === 'unavailable') {
-    return (
-      <Alert tone="error" title="FalkorDB is unavailable" action={retry}>
-        The API is running but cannot reach the graph database ({health.database.message ?? 'connection failed'}). Check that your FalkorDB Cloud instance is running.
-      </Alert>
-    )
+  if (error) return <Alert tone="error" title={t('health.offline.title')} action={retry}>{t('error.network')}</Alert>
+  if (health && health.database.status !== 'connected') {
+    return <Alert tone="error" title={t('error.unavailable.title')} action={retry}>{t('error.unavailable')}</Alert>
   }
   return null
 }

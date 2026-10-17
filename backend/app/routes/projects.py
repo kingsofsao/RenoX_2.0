@@ -14,7 +14,7 @@ from ..services.investigation_service import InvestigationManager, get_manager
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-ProjectIdPath = Path(pattern=r"^(default|prj_[0-9a-f]{10})$")
+ProjectIdPath = Path(pattern=r"^prj_[0-9a-f]{10}$")
 
 
 def _out(project, registry: BaseRegistry, with_counts: bool = True) -> dict:
@@ -32,6 +32,7 @@ def _out(project, registry: BaseRegistry, with_counts: bool = True) -> dict:
 
 @router.get("", response_model=ProjectList)
 def list_projects(owner: str = Depends(get_principal), registry: BaseRegistry = Depends(get_registry)) -> dict:
+    registry.ensure_workspace(owner)  # every account always has at least one project
     return {"projects": [_out(p, registry) for p in registry.list_projects(owner)]}
 
 
@@ -59,7 +60,9 @@ def delete_project(body: ProjectDelete, project_id: str = ProjectIdPath, owner: 
                    registry: BaseRegistry = Depends(get_registry),
                    manager: InvestigationManager = Depends(get_manager)) -> None:
     """Deletes the project's graph, files and saved investigations. Requires the exact project name."""
+    registry.get_project(project_id, owner)  # ownership first: another user's project is a 404, never a 409
     if manager.running(project_id):
         raise HTTPException(409, "An investigation is running in this project. Wait for it to finish before deleting.")
     registry.delete_project(project_id, body.confirm_name, owner)
     forget_project(project_id)
+    manager.forget_project(project_id)

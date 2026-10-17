@@ -7,12 +7,15 @@ from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, Upload
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
+from researchmind.accounts import User
 from researchmind.documents import DocumentStore
 from researchmind.graph import GraphStore
 from researchmind.projects import Project
 
+from ..auth import get_current_user
 from ..config import get_api_settings
 from ..database import get_project, get_store
+from ..ratelimit import get_limiters
 from ..schemas.paper import PaperDetailResponse, PaperListResponse, UploadResponse
 from ..services import graph_service
 from ..services.pdf_service import UploadRejected, process_upload, stage_upload
@@ -29,10 +32,12 @@ def get_documents(project: Project = Depends(get_project)) -> DocumentStore:
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_papers(files: Annotated[list[UploadFile], File(description="One or more PDF files")],
-                        store: GraphStore = Depends(get_store), project: Project = Depends(get_project)) -> dict:
+                        store: GraphStore = Depends(get_store), project: Project = Depends(get_project),
+                        user: User = Depends(get_current_user)) -> dict:
     settings = get_api_settings()
     if len(files) > settings.max_files_per_upload:
         raise HTTPException(400, f"Too many files: at most {settings.max_files_per_upload} per upload.")
+    get_limiters().uploads.hit(user.id, cost=len(files))
 
     results = []
     for f in files:

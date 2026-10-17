@@ -2,21 +2,21 @@
 
 Schema
   (:Paper {id, title, authors, year, abstract, source_file, num_pages, sha256, extractor})
-  (:Author {id, name})-[:AUTHORED]->(:Paper)
+  (:Author {id, paper_id, name})-[:AUTHORED]->(:Paper)
   (:Paper)-[:HAS_CHUNK]->(:Chunk {id, paper_id, page, section, text, embedding})
   (:Paper)-[:HAS_PAGE]->(:Page {id, paper_id, number, text, chars})      full page text, browsable in FalkorDB
   (:Chunk)-[:ON_PAGE]->(:Page)                                           STORE_PAGES_IN_GRAPH (default on)
-  (:Paper)-[:USES_METHOD {chunk_id, quote}]->(:Method {id, name})          shared across papers
-  (:Paper)-[:USES_DATASET {chunk_id, quote}]->(:Dataset {id, name})        shared across papers
+  (:Paper)-[:USES_METHOD {chunk_id, quote}]->(:Method {id, paper_id, name})
+  (:Paper)-[:USES_DATASET {chunk_id, quote}]->(:Dataset {id, paper_id, name})
   (:Paper)-[:MAKES_CLAIM]->(:Claim)  (:Paper)-[:REPORTS_FINDING]->(:Finding)
   (:Paper)-[:HAS_LIMITATION]->(:Limitation {kind})
   (:Claim|Finding|Limitation)-[:SUPPORTED_BY {quote}]->(:Chunk)            evidence
   (:Claim|Finding)-[:ABOUT_METHOD]->(:Method)  (:Finding)-[:EVALUATED_ON]->(:Dataset)
-  Cross-paper edges (computed with embeddings):
-  (:Claim|Finding)-[:SIMILAR_TO {score}]->(:Claim|Finding)
-  (:Claim|Finding)-[:CONTRADICTS {score}]->(:Claim|Finding)
-  (:Limitation)-[:SIMILAR_TO {score}]->(:Limitation)                      recurring limitation
-  (:Limitation)-[:ADDRESSED_BY {score}]->(:Claim|Finding)                  another paper tackles it
+
+Paper isolation: every node belongs to exactly one paper. Method, Dataset and Author nodes are
+per paper (ids prefixed with the paper id) and no edges are created between papers, so a paper's
+knowledge graph never touches another paper's - in the same account or any other. (Accounts are
+further separated by project: each project is its own FalkorDB graph.)
 
 All writes use MERGE on deterministic ids, so re-ingesting a paper never duplicates nodes.
 """
@@ -39,9 +39,6 @@ from .ingest import ParsedPaper
 log = logging.getLogger(__name__)
 
 STATEMENT_LABELS = ("Claim", "Finding", "Limitation")
-SIMILAR_THRESHOLD = 0.62
-CONTRADICT_THRESHOLD = 0.5
-ADDRESS_THRESHOLD = 0.5
 
 NEG = re.compile(r"\b(not|no|fail|fails|failed|worse|underperform\w*|drop|drops|decrease\w*|cannot|unable|poor\w*|degrad\w*)\b", re.I)
 POS = re.compile(r"\b(improv\w*|outperform\w*|generaliz\w* well|better|increase\w*|gain\w*|effective|succeed\w*|achiev\w*)\b", re.I)
@@ -55,6 +52,11 @@ def polarity(text: str) -> int:
     """Rough sentiment of a scientific statement: +1 positive result, -1 negative, 0 neutral."""
     neg, pos = len(NEG.findall(text)), len(POS.findall(text))
     return 0 if neg == pos else (1 if pos > neg else -1)
+
+
+def entity_id(paper_id: str, name: str) -> str:
+    """Per-paper id of a method, dataset or author, so entities are never shared between papers."""
+    return f"{paper_id}:{slug(name)}"
 
 
 def statement_id(paper_id: str, label: str, text: str) -> str:
@@ -138,9 +140,11 @@ class GraphStore:
         return rows[0] if rows else None
 
     def delete_paper(self, paper_id: str) -> None:
-        """Remove a paper and everything it owns; shared Method/Dataset/Author nodes are kept if still used."""
+        """Remove a paper and every node it owns."""
         self.query("MATCH (p:Paper {id: $id})-[:HAS_CHUNK|HAS_PAGE|MAKES_CLAIM|REPORTS_FINDING|HAS_LIMITATION]->(n) DETACH DELETE n", {"id": paper_id})
+        self.query("MATCH (n) WHERE (n:Method OR n:Dataset OR n:Author) AND n.paper_id = $id DETACH DELETE n", {"id": paper_id})
         self.query("MATCH (p:Paper {id: $id}) DETACH DELETE p", {"id": paper_id})
+        # Entities of graphs written before per-paper entities existed, left without any paper.
         self.query("MATCH (n) WHERE (n:Method OR n:Dataset OR n:Author) AND NOT (n)--() DELETE n")
 
     def record_failure(self, paper_id: str, sha256: str, filename: str, code: str, message: str,
@@ -159,16 +163,7 @@ class GraphStore:
         self.check_embedder()
         embedder = get_embedder()
 
-        # Same paper re-exported with different bytes (e.g. a new arXiv version): match on the
-        # detected title and replace. Papers without a detected title are never merged this way.
-        if paper.title_detected:
-            norm_title = re.sub(r"[^a-z0-9]", "", paper.title.lower())
-            for row in self.query("""MATCH (p:Paper) WHERE coalesce(p.status, 'processed') = 'processed'
-                                     AND coalesce(p.title_detected, true) = true
-                                     RETURN p.id AS id, p.title AS title""", read_only=True):
-                if row["id"] != paper.id and re.sub(r"[^a-z0-9]", "", (row["title"] or "").lower()) == norm_title:
-                    log.info("Replacing earlier version of '%s' (%s)", paper.title, row["id"])
-                    self.delete_paper(row["id"])
+        # Only an identical file (same content hash = same id) is replaced; other papers are never touched.
         self.delete_paper(paper.id)
 
         self.query(
@@ -187,8 +182,8 @@ class GraphStore:
         if paper.authors:
             self.query(
                 """MATCH (p:Paper {id: $pid}) UNWIND $authors AS a
-                   MERGE (au:Author {id: a.id}) SET au.name = a.name MERGE (au)-[:AUTHORED]->(p)""",
-                {"pid": paper.id, "authors": [{"id": slug(a), "name": a} for a in paper.authors]},
+                   MERGE (au:Author {id: a.id}) SET au.name = a.name, au.paper_id = $pid MERGE (au)-[:AUTHORED]->(p)""",
+                {"pid": paper.id, "authors": [{"id": entity_id(paper.id, a), "name": a} for a in paper.authors]},
             )
 
         # Chunks (evidence passages) with embeddings
@@ -216,21 +211,21 @@ class GraphStore:
                 """MATCH (c:Chunk {paper_id: $pid}) MATCH (pg:Page {paper_id: $pid}) WHERE pg.number = c.page
                    MERGE (c)-[:ON_PAGE]->(pg)""", {"pid": paper.id})
 
-        # Shared entities
+        # Entities (methods, datasets) of this paper only
         for rel, label, items in (("USES_METHOD", "Method", extraction.methods), ("USES_DATASET", "Dataset", extraction.datasets)):
-            rows = [{"id": slug(i.text), "name": i.text, "chunk_id": i.chunk_id, "quote": i.quote} for i in items if slug(i.text)]
+            rows = [{"id": entity_id(paper.id, i.text), "name": i.text, "chunk_id": i.chunk_id, "quote": i.quote}
+                    for i in items if slug(i.text)]
             if rows:
                 self.query(
                     f"""MATCH (p:Paper {{id: $pid}}) UNWIND $rows AS r
-                        MERGE (e:{label} {{id: r.id}}) ON CREATE SET e.name = r.name
+                        MERGE (e:{label} {{id: r.id}}) ON CREATE SET e.name = r.name, e.paper_id = $pid
                         MERGE (p)-[x:{rel}]->(e) SET x.chunk_id = r.chunk_id, x.quote = r.quote""",
                     {"pid": paper.id, "rows": rows},
                 )
 
         # Statements with evidence links
-        method_names = {slug(m.text): m.text for m in extraction.methods}
-        dataset_names = {slug(d.text): d.text for d in extraction.datasets}
-        new_statements: list[dict] = []
+        method_names = {entity_id(paper.id, m.text): m.text for m in extraction.methods if slug(m.text)}
+        dataset_names = {entity_id(paper.id, d.text): d.text for d in extraction.datasets if slug(d.text)}
         for label, rel, items in (("Claim", "MAKES_CLAIM", extraction.claims),
                                   ("Finding", "REPORTS_FINDING", extraction.findings),
                                   ("Limitation", "HAS_LIMITATION", extraction.limitations)):
@@ -264,49 +259,8 @@ class GraphStore:
                     f"""UNWIND $rows AS r MATCH (s:{label} {{id: r.id}})
                         UNWIND r.datasets AS did MATCH (d:Dataset {{id: did}}) MERGE (s)-[:EVALUATED_ON]->(d)""",
                     {"rows": rows})
-            new_statements += [{**r, "label": label} for r in rows]
 
-        links = self._link_across_papers(paper.id, new_statements)
-        return {"paper_id": paper.id, "chunks": len(paper.chunks), **extraction.counts(), "cross_paper_links": links}
-
-    def _nearest(self, label: str, vec: list[float], k: int = 8) -> list[dict]:
-        return self.query(
-            f"""CALL db.idx.vector.queryNodes('{label}', 'embedding', $k, vecf32($vec)) YIELD node, score
-                RETURN node.id AS id, node.paper_id AS paper_id, node.text AS text, node.polarity AS polarity, 1 - score AS sim""",
-            {"k": k, "vec": vec}, read_only=True)
-
-    def _link_across_papers(self, paper_id: str, statements: list[dict]) -> int:
-        """Create SIMILAR_TO / CONTRADICTS / ADDRESSED_BY edges between this paper's statements and other papers'."""
-        edges: list[tuple[str, str, str, float]] = []
-        for s in statements:
-            targets = ("Claim", "Finding") if s["label"] != "Limitation" else ("Limitation", "Claim", "Finding")
-            for target in targets:
-                for hit in self._nearest(target, s["vec"]):
-                    if hit["paper_id"] == paper_id:
-                        continue
-                    sim = float(hit["sim"])
-                    if s["label"] == "Limitation":
-                        if target == "Limitation" and sim >= SIMILAR_THRESHOLD:
-                            edges.append(("SIMILAR_TO", s["id"], hit["id"], sim))
-                        elif target != "Limitation" and sim >= ADDRESS_THRESHOLD:
-                            edges.append(("ADDRESSED_BY", s["id"], hit["id"], sim))
-                    else:
-                        if sim >= CONTRADICT_THRESHOLD and s["polarity"] * (hit["polarity"] or 0) < 0:
-                            edges.append(("CONTRADICTS", s["id"], hit["id"], sim))
-                        elif sim >= SIMILAR_THRESHOLD:
-                            edges.append(("SIMILAR_TO", s["id"], hit["id"], sim))
-            # Older limitations that this new paper's claims/findings may address
-            if s["label"] != "Limitation":
-                for hit in self._nearest("Limitation", s["vec"]):
-                    if hit["paper_id"] != paper_id and float(hit["sim"]) >= ADDRESS_THRESHOLD:
-                        edges.append(("ADDRESSED_BY", hit["id"], s["id"], float(hit["sim"])))
-        for rel in ("SIMILAR_TO", "CONTRADICTS", "ADDRESSED_BY"):
-            rows = [{"a": a, "b": b, "score": round(sc, 3)} for r, a, b, sc in edges if r == rel]
-            if rows:
-                self.query(
-                    f"""UNWIND $rows AS r MATCH (a {{id: r.a}}), (b {{id: r.b}})
-                        MERGE (a)-[x:{rel}]->(b) SET x.score = r.score""", {"rows": rows})
-        return len(edges)
+        return {"paper_id": paper.id, "chunks": len(paper.chunks), **extraction.counts()}
 
     # ------------------------------------------------------------------ reads
     def stats(self) -> dict:

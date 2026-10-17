@@ -1,9 +1,9 @@
 """FalkorDB connection management for the API, per project.
 
 One FalkorDB client (connection pool) is shared by the project registry and every project's
-GraphStore. Routes receive the store of the project named in the URL (`/api/projects/{id}/...`);
-legacy unscoped routes (`/api/papers`, ...) resolve to the Default project. The project - and so
-the graph - is always chosen here on the server, never by the client.
+GraphStore. Routes receive the store of the project named in the URL (`/api/projects/{id}/...`),
+and only after checking that the signed-in user owns that project. The project - and so the
+graph - is always chosen here on the server, never by the client.
 
 If the database is down at startup or drops later, the next request retries. Error details are
 logged server-side; clients only ever see generic messages.
@@ -19,9 +19,12 @@ from fastapi import Depends, Request
 from falkordb import FalkorDB
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 
+from researchmind.accounts import BaseAccounts, FalkorAccounts, User
 from researchmind.config import get_settings
 from researchmind.graph import GraphConnectionError, GraphStore
-from researchmind.projects import DEFAULT_PROJECT_ID, LOCAL_OWNER, FalkorRegistry, Project
+from researchmind.projects import FalkorRegistry, Project
+
+from .auth import get_current_user
 
 log = logging.getLogger("researchmind.api.database")
 
@@ -36,6 +39,7 @@ class DatabaseUnavailable(Exception):
 
 _db: FalkorDB | None = None
 _registry: FalkorRegistry | None = None
+_accounts: FalkorAccounts | None = None
 _stores: dict[str, GraphStore] = {}
 _lock = threading.RLock()
 
@@ -79,16 +83,31 @@ def get_registry() -> FalkorRegistry:
         return _registry
 
 
-def get_principal() -> str:
-    """The acting user. No authentication yet: everyone is the local owner (see projects.authorize)."""
-    return LOCAL_OWNER
+def get_account_store() -> BaseAccounts:
+    """Users and sessions (stored in the registry graph)."""
+    global _accounts
+    if _accounts is not None:
+        return _accounts
+    with _lock:
+        if _accounts is None:
+            try:
+                _accounts = FalkorAccounts(_client(), get_registry().graph_name)
+            except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+                log.warning("Account store unavailable: %s", e.__class__.__name__)
+                reset_store()
+                raise DatabaseUnavailable("unavailable") from e
+        return _accounts
+
+
+def get_principal(user: User = Depends(get_current_user)) -> str:
+    """The acting user's id. Every project, graph and investigation lookup is checked against it."""
+    return user.id
 
 
 def get_project(request: Request, owner: str = Depends(get_principal),
                 registry=Depends(get_registry)) -> Project:
-    """Project from the URL path (`project_id`), or the Default project for legacy unscoped routes."""
-    project_id = request.path_params.get("project_id", DEFAULT_PROJECT_ID)
-    return registry.get_project(project_id, owner)  # raises ProjectError(not_found) -> 404
+    """Project from the URL path (`project_id`), only if the signed-in user owns it (404 otherwise)."""
+    return registry.get_project(request.path_params.get("project_id", ""), owner)
 
 
 def store_for(project: Project) -> GraphStore:
@@ -121,10 +140,11 @@ def forget_project(project_id: str) -> None:
 
 def reset_store() -> None:
     """Drop cached connections so the next request reconnects (after a connection error)."""
-    global _db, _registry
+    global _db, _registry, _accounts
     with _lock:
         _stores.clear()
         _registry = None
+        _accounts = None
         if _db is not None:
             try:
                 _db.close()

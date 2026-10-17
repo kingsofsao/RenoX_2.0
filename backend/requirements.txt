@@ -1,25 +1,27 @@
+# Runtime dependencies. Minimum versions are the ones the test suite runs against; audit with
+#   pip install pip-audit && pip-audit -r requirements.txt
+# Development and test tools are in requirements-dev.txt.
+
 # --- API ---------------------------------------------------------------------
-fastapi>=0.140
-uvicorn[standard]>=0.30
-python-multipart>=0.0.10
+fastapi>=0.143.3
+uvicorn[standard]>=0.54.0
+python-multipart>=0.0.32       # multipart parsing for PDF uploads
+
+# --- Security ------------------------------------------------------------------
+argon2-cffi>=25.1.0            # Argon2id password hashing
 
 # --- Graph database ----------------------------------------------------------
 falkordb>=1.8.0
-python-dotenv>=1.0.1
+python-dotenv>=1.2.4
 
 # --- PDF ingestion -----------------------------------------------------------
 pdfplumber>=0.11.10
 
 # --- Semantic retrieval (vectors live in FalkorDB's native vector index) -----
 sentence-transformers>=6.1.0
-numpy>=2.0
+numpy>=2.5.4
 
-# --- Agent + MCP tools (next phase; already implemented in researchmind/) -----
-anthropic>=1.14.0
+# --- AI agent + MCP tools -----------------------------------------------------
+anthropic>=1.15.0
+httpx>=0.28.1                  # Ollama client
 mcp>=2.3.0
-
-# --- Tests and sample PDFs -----------------------------------------------------
-pytest>=8.0
-httpx>=0.27
-reportlab>=5.0.1
-pillow>=10.0

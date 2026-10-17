@@ -8,21 +8,34 @@ import io
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app import database
 from app.config import get_api_settings
 from app.main import app
+from authclient import sign_up
 from pdf_fixtures import blank_pdf, encrypted_pdf, scanned_pdf, untitled_pdf
 from researchmind.ingest import IngestionError, parse_pdf
 
 
 @pytest.fixture
-def client(monkeypatch):
+def signed_in(monkeypatch):
+    """(client, project id) of a freshly signed-up user."""
     database.reset_store()
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    client, _, pid = sign_up()
+    yield client, pid
+    for dep in (database.get_store,):
+        app.dependency_overrides.pop(dep, None)
     database.reset_store()
+
+
+@pytest.fixture
+def client(signed_in):
+    return signed_in[0]
+
+
+@pytest.fixture
+def papers_url(signed_in):
+    return f"/api/projects/{signed_in[1]}/papers"
 
 
 def test_health_without_database_config(client, monkeypatch):
@@ -44,15 +57,15 @@ def test_health_database_unreachable_hides_credentials(client, monkeypatch):
     assert "SuperSecret123" not in r.text and "localhost:1" not in r.text
 
 
-def test_routes_return_503_without_database(client, monkeypatch):
+def test_routes_return_503_without_database(client, papers_url, monkeypatch):
     monkeypatch.setenv("FALKORDB_URL", "falkor://default:SuperSecret123@localhost:1")
-    r = client.get("/api/papers")
+    r = client.get(papers_url)
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "database_unavailable"
     assert "SuperSecret123" not in r.text and "Traceback" not in r.text
 
 
-def test_upload_rejects_invalid_files_before_touching_database(client):
+def test_upload_rejects_invalid_files_before_touching_database(client, papers_url):
     fake_store = MagicMock()
     app.dependency_overrides[database.get_store] = lambda: fake_store
     files = [
@@ -60,7 +73,7 @@ def test_upload_rejects_invalid_files_before_touching_database(client):
         ("files", ("renamed.pdf", io.BytesIO(b"this is not a pdf"), "application/pdf")),
         ("files", ("empty.pdf", io.BytesIO(b""), "application/pdf")),
     ]
-    r = client.post("/api/papers/upload", files=files)
+    r = client.post(f"{papers_url}/upload", files=files)
     assert r.status_code == 200
     codes = [x["error_code"] for x in r.json()["results"]]
     assert codes == ["not_pdf", "not_pdf", "empty_file"]
@@ -68,38 +81,38 @@ def test_upload_rejects_invalid_files_before_touching_database(client):
     fake_store.query.assert_not_called()
 
 
-def test_upload_enforces_size_limit(client, monkeypatch):
+def test_upload_enforces_size_limit(client, papers_url, monkeypatch):
     app.dependency_overrides[database.get_store] = lambda: MagicMock()
     monkeypatch.setenv("MAX_UPLOAD_MB", "1")
     get_api_settings.cache_clear()
     try:
         big = b"%PDF-1.4\n" + b"0" * (1024 * 1024 + 10)
-        r = client.post("/api/papers/upload", files=[("files", ("big.pdf", io.BytesIO(big), "application/pdf"))])
+        r = client.post(f"{papers_url}/upload", files=[("files", ("big.pdf", io.BytesIO(big), "application/pdf"))])
         assert r.json()["results"][0]["error_code"] == "too_large"
-        leftovers = list(get_api_settings().upload_dir.glob("*.part"))
+        leftovers = list(get_api_settings().upload_dir.parent.rglob("*.part"))
         assert leftovers == []  # partial file cleaned up
     finally:
         monkeypatch.delenv("MAX_UPLOAD_MB")
         get_api_settings.cache_clear()
 
 
-def test_upload_limits_file_count(client, monkeypatch):
+def test_upload_limits_file_count(client, papers_url, monkeypatch):
     app.dependency_overrides[database.get_store] = lambda: MagicMock()
     files = [("files", (f"f{i}.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf"))
              for i in range(get_api_settings().max_files_per_upload + 1)]
-    r = client.post("/api/papers/upload", files=files)
+    r = client.post(f"{papers_url}/upload", files=files)
     assert r.status_code == 400 and "Too many files" in r.json()["error"]["message"]
 
 
-def test_upload_requires_files(client):
+def test_upload_requires_files(client, papers_url):
     app.dependency_overrides[database.get_store] = lambda: MagicMock()
-    r = client.post("/api/papers/upload")
+    r = client.post(f"{papers_url}/upload")
     assert r.status_code == 422 and r.json()["error"]["code"] == "validation_error"
 
 
-def test_invalid_paper_id_is_rejected(client):
+def test_invalid_paper_id_is_rejected(client, papers_url):
     app.dependency_overrides[database.get_store] = lambda: MagicMock()
-    r = client.get("/api/papers/..%2F..%2Fsecrets")
+    r = client.get(f"{papers_url}/..%2F..%2Fsecrets")
     assert r.status_code in (404, 422)
 
 

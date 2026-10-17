@@ -14,9 +14,11 @@ Registry: a separate graph `<FALKORDB_GRAPH>_registry` holds
 Migration: the pre-existing graph `<FALKORDB_GRAPH>` and the legacy data folders become the
 "Default project" (id "default") without copying anything.
 
-Ownership: every project has an owner_id. Until authentication exists, everything belongs to
-LOCAL_OWNER; `authorize()` is the single place a future auth layer plugs in. This is NOT access
-control for a public multi-user deployment.
+Ownership: every project has an owner_id - the id of the signed-in user (accounts.py) who
+created it. `authorize()` is checked on every project lookup, and a project of another user is
+reported as "not found" so its existence is never revealed. Each new account gets its own first
+project ("workspace") at sign-up. The legacy Default project belongs to LOCAL_OWNER, which is only
+used by the command-line tools; no signed-in user can reach it.
 """
 
 from __future__ import annotations
@@ -90,9 +92,8 @@ class Project:
 
 
 def authorize(project: Project, owner_id: str, action: str) -> None:
-    """Single authorization hook. Today every request is LOCAL_OWNER; a future auth layer passes the
-    authenticated user id here and this check becomes meaningful (actions: read | write | delete)."""
-    if project.owner_id != owner_id:
+    """Single authorization hook (actions: read | write | delete): only the owner may touch a project."""
+    if not owner_id or project.owner_id != owner_id:
         raise ProjectError("Project not found.", "not_found")  # do not reveal other users' projects
 
 
@@ -122,7 +123,7 @@ def _new_project(name: str, description: str, owner_id: str, project_id: str | N
 
 INVESTIGATION_FIELDS = ("id", "project_id", "owner_id", "question", "requirements", "status", "mode", "provider", "model",
                         "use_llm", "created_at", "started_at", "finished_at", "duration_seconds", "error_code",
-                        "error_message", "result_json", "progress_json")
+                        "error_message", "result_json", "progress_json", "paper_ids_json", "paper_title", "language")
 
 
 class BaseRegistry:
@@ -148,15 +149,36 @@ class BaseRegistry:
             self._put_project(p)
         return p
 
+    def ensure_workspace(self, owner_id: str, name: str = "My research") -> Project:
+        """The user's first project, created when they have none (at sign-up)."""
+        mine = [p for p in self._all_projects() if p.owner_id == owner_id]
+        if mine:
+            return min(mine, key=lambda p: p.created_at)
+        p = _new_project(name, "", owner_id)
+        self._put_project(p)
+        return p
+
+    def purge_owner(self, owner_id: str) -> int:
+        """Delete every project of a user, with its graph, files and saved investigations (account deletion)."""
+        mine = [p for p in self._all_projects() if p.owner_id == owner_id and not p.is_default]
+        for p in mine:
+            self._drop_project_graph(p)
+            root = p.root
+            if root.exists() and root.resolve().is_relative_to((get_settings().data_dir / "projects").resolve()):
+                shutil.rmtree(root, ignore_errors=True)
+            self._remove_project(p.id)
+        return len(mine)
+
     def list_projects(self, owner_id: str = LOCAL_OWNER) -> list[Project]:
-        self.ensure_default()
+        if owner_id == LOCAL_OWNER:
+            self.ensure_default()
         return sorted((p for p in self._all_projects() if p.owner_id == owner_id),
                       key=lambda p: (not p.is_default, p.name.lower()))
 
     def get_project(self, project_id: str, owner_id: str = LOCAL_OWNER) -> Project:
         if not PROJECT_ID.match(project_id or ""):
             raise ProjectError("Project not found.", "not_found")
-        if project_id == DEFAULT_PROJECT_ID:
+        if project_id == DEFAULT_PROJECT_ID and owner_id == LOCAL_OWNER:
             self.ensure_default()
         p = self._get_project(project_id)
         if p is None:
@@ -283,6 +305,7 @@ class FalkorRegistry(BaseRegistry):
         rows = self._q("""MATCH (i:Investigation {project_id: $pid})
                           RETURN i.id AS id, i.project_id AS project_id, i.question AS question, i.status AS status,
                                  i.mode AS mode, i.provider AS provider, i.model AS model, i.created_at AS created_at,
+                                 i.paper_title AS paper_title,
                                  i.duration_seconds AS duration_seconds
                           ORDER BY i.created_at DESC SKIP $offset LIMIT $limit""",
                        {"pid": project_id, "offset": offset, "limit": limit}, read_only=True)
@@ -334,7 +357,8 @@ class MemoryRegistry(BaseRegistry):
     def _list_investigations(self, project_id, limit, offset):
         items = sorted((v for v in self.investigations.values() if v["project_id"] == project_id),
                        key=lambda v: v.get("created_at") or "", reverse=True)
-        keys = ("id", "project_id", "question", "status", "mode", "provider", "model", "created_at", "duration_seconds")
+        keys = ("id", "project_id", "question", "status", "mode", "provider", "model", "created_at", "duration_seconds",
+                "paper_title")
         return [{k: v.get(k) for k in keys} for v in items[offset:offset + limit]], len(items)
 
     def _remove_investigation(self, inv_id):

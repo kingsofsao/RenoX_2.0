@@ -9,18 +9,19 @@ import time
 
 import pytest
 from fastapi import Depends
-from fastapi.testclient import TestClient
 
 from app import database
 from app.main import app
 from app.services import investigation_service
 from app.services.investigation_service import InvestigationManager
-from fakes import FakeStore, FakeTools
+from authclient import sign_up
+from fakes import P1, FakeStore, FakeTools
 from researchmind.agent import Investigator
 from researchmind.investigation import build_structured, inferences, open_questions
 from researchmind.projects import MemoryRegistry, ProjectError
 
 QUESTION = "Do graph attention models generalize to unseen proteins?"
+ASK = {"question": QUESTION, "paper_id": P1}
 
 
 @pytest.fixture
@@ -29,11 +30,12 @@ def api(memory_registry):
 
     def store(project=Depends(database.get_project)):
         return stores.setdefault(project.id, FakeStore())
-    manager = InvestigationManager(2, 30, investigator_factory=lambda s, use_llm=True, time_budget_s=None:
+    manager = InvestigationManager(2, 30, investigator_factory=lambda s, **kw:
                                    Investigator(s, use_llm=False, tools=FakeTools(store=s)))
     app.dependency_overrides[database.get_store] = store
     app.dependency_overrides[investigation_service.get_manager] = lambda: manager
-    yield TestClient(app), memory_registry, manager
+    client, _, _ = sign_up()
+    yield client, memory_registry, manager
     app.dependency_overrides.pop(database.get_store, None)
     app.dependency_overrides.pop(investigation_service.get_manager, None)
 
@@ -43,7 +45,7 @@ def api(memory_registry):
 def test_project_lifecycle(api):
     client, registry, _ = api
     listed = client.get("/api/projects").json()["projects"]
-    assert [p["id"] for p in listed] == ["default"] and listed[0]["is_default"]
+    assert len(listed) == 1 and listed[0]["name"] == "My research" and listed[0]["id"].startswith("prj_")
     created = client.post("/api/projects", json={"name": "  KidBrace   research ", "description": "Wearables"})
     assert created.status_code == 201
     p = created.json()
@@ -54,7 +56,8 @@ def test_project_lifecycle(api):
     assert client.post("/api/projects", json={"name": "x" * 81}).status_code == 422
     renamed = client.patch(f"/api/projects/{p['id']}", json={"name": "KidBrace v2"}).json()
     assert renamed["name"] == "KidBrace v2" and renamed["updated_at"] >= p["updated_at"]
-    assert client.patch("/api/projects/default", json={"name": "KidBrace v2"}).status_code == 409
+    assert client.patch(f"/api/projects/{listed[0]['id']}", json={"name": "KidBrace v2"}).status_code == 409
+    assert client.patch("/api/projects/default", json={"name": "Mine now"}).status_code in (404, 422)
 
 
 def test_project_delete_safeguards(api):
@@ -63,7 +66,7 @@ def test_project_delete_safeguards(api):
     assert client.request("DELETE", f"/api/projects/{pid}", json={"confirm_name": "temp"}).status_code == 422
     assert client.request("DELETE", f"/api/projects/{pid}", json={}).status_code == 422
     r = client.request("DELETE", "/api/projects/default", json={"confirm_name": "Default project"})
-    assert r.status_code == 403 and "cannot be deleted" in r.json()["error"]["message"]
+    assert r.status_code in (404, 422)  # the legacy local project is never reachable by an account
     assert client.request("DELETE", f"/api/projects/{pid}", json={"confirm_name": "Temp"}).status_code == 204
     assert registry.dropped_graphs == [registry_graph(pid)]
     assert client.get(f"/api/projects/{pid}").status_code == 404
@@ -94,6 +97,8 @@ def test_authorize_hides_other_owners_projects():
         reg.get_project(p.id, owner_id="bob")
     assert e.value.code == "not_found"
     assert reg.list_projects("bob") == []  # the Default project belongs to the local owner
+    with pytest.raises(ProjectError):
+        reg.get_project("default", owner_id="bob")
 
 
 # ---------------------------------------------------------------------- investigations per project
@@ -111,13 +116,13 @@ def test_investigations_are_saved_and_scoped(api):
     client, registry, _ = api
     a = client.post("/api/projects", json={"name": "A"}).json()["id"]
     b = client.post("/api/projects", json={"name": "B"}).json()["id"]
-    started = client.post(f"/api/projects/{a}/investigations", json={"question": QUESTION, "wait": False}).json()
-    assert started["project_id"] == a
+    started = client.post(f"/api/projects/{a}/investigations", json={**ASK, "wait": False}).json()
+    assert started["project_id"] == a and started["paper_ids"] == [P1]
     done = wait_done(client, a, started["id"])
     assert done["status"] == "completed" and done["result"]["sources"]
     rec = registry.get_investigation(a, started["id"])
     assert rec["status"] == "completed" and rec["result_json"] and rec["question"] == QUESTION
-    # other project / legacy default route cannot see it
+    # another project (or a legacy unscoped route) cannot see it
     assert client.get(f"/api/projects/{b}/investigations/{started['id']}").status_code == 404
     assert client.get(f"/api/investigations/{started['id']}").status_code == 404
     assert client.get(f"/api/projects/{b}/investigations").json()["total"] == 0
@@ -128,7 +133,7 @@ def test_investigations_are_saved_and_scoped(api):
 def test_saved_result_is_served_after_restart(api):
     client, registry, manager = api
     pid = client.post("/api/projects", json={"name": "Persist"}).json()["id"]
-    inv = client.post(f"/api/projects/{pid}/investigations", json={"question": QUESTION}).json()
+    inv = client.post(f"/api/projects/{pid}/investigations", json={**ASK, "wait": True}).json()
     # "restart": a new manager with no in-memory jobs
     app.dependency_overrides[investigation_service.get_manager] = lambda: InvestigationManager(1, 30)
     again = client.get(f"/api/projects/{pid}/investigations/{inv['id']}").json()
@@ -156,8 +161,8 @@ def test_project_with_running_investigation_cannot_be_deleted(api):
         def list_papers(self):
             time.sleep(0.6)
             return super().list_papers()
-    manager.investigator_factory = lambda s, use_llm=True, time_budget_s=None: Investigator(s, use_llm=False, tools=Slow(store=s))
-    client.post(f"/api/projects/{pid}/investigations", json={"question": QUESTION, "wait": False})
+    manager.investigator_factory = lambda s, **kw: Investigator(s, use_llm=False, tools=Slow(store=s))
+    client.post(f"/api/projects/{pid}/investigations", json={**ASK, "wait": False})
     assert client.request("DELETE", f"/api/projects/{pid}", json={"confirm_name": "Busy"}).status_code == 409
 
 

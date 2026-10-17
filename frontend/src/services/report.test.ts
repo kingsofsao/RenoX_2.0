@@ -11,7 +11,8 @@ const P2 = 'p_bbbbbbbbbbb2'
 function sampleInvestigation(overrides: Partial<Investigation> = {}): Investigation {
   return {
     id: 'inv_0123456789ab', project_id: 'default', question: 'Do GAT models generalize to unseen proteins?', status: 'completed', mode: 'offline',
-    llm_configured: false, provider: null, model: null, requirements: null, created_at: '2026-10-15T04:00:00+00:00', started_at: '2026-10-15T04:00:00+00:00',
+    llm_configured: false, provider: null, model: null, requirements: null, paper_ids: [P1], paper_title: 'Paper A', language: 'en',
+    created_at: '2026-10-15T04:00:00+00:00', started_at: '2026-10-15T04:00:00+00:00',
     finished_at: '2026-10-15T04:00:04+00:00', duration_seconds: 4.2, progress: [], error: null,
     result: {
       mode: 'offline', evidence_found: true, summary: 'Evidence is mixed [1], [2].', inferences: [], open_questions: [],
@@ -63,15 +64,21 @@ describe('splitCitations', () => {
 describe('buildMarkdownExport', () => {
   it('contains every section with numbered page-level sources', () => {
     const md = buildMarkdownExport(sampleInvestigation())
-    for (const h of ['# Investigation:', '## Summary', '## Evidence-backed findings', '## Cross-paper comparisons', '## Candidate research gaps',
-      '## Limitations of the evidence', '## Confidence and uncertainty', '## Narrative report', '## Sources', '## Investigation trace']) {
+    for (const h of ['# Investigation:', '## Answer', '## Evidence-backed findings', '## Methods and datasets', '## Candidate research gaps',
+      '## Limitations of the evidence', '## Confidence', '## Full AI analysis', '## Sources', '## Investigation trace']) {
       expect(md).toContain(h)
     }
     expect(md).toContain('1. *Paper A* (2024), p. 2, Results — "GAT generalizes well." `p_aaaaaaaaaaa1:c004`')
-    expect(md).toContain('not claims of novelty')
-    expect(md).toContain('**Confidence: moderate**')
+    expect(md).toContain('not confirmed novel findings')
+    expect(md).toContain('**Confidence: Moderate confidence**')
+    expect(md).toContain('- **Paper:** Paper A (`p_aaaaaaaaaaa1`)')
     // The agent's own References section is replaced by the Sources list (same numbering)
     expect(md.match(/## References/g)).toBeNull()
+  })
+  it('is written in the UI language when given a translator', () => {
+    const md = buildMarkdownExport(sampleInvestigation(), (key) => `<${key}>`)
+    expect(md).toContain('## <result.findings>')
+    expect(md).not.toContain('Evidence-backed findings')
   })
   it('exports failed investigations with the error', () => {
     const md = buildMarkdownExport(sampleInvestigation({ status: 'failed', result: null, error: { code: 'investigation_failed', message: 'Boom.' } }))

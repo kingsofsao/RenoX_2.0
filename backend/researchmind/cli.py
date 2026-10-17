@@ -68,8 +68,8 @@ def cmd_ingest(args) -> int:
                     print(f"  ERROR {r.get('file')}: {r.get('error')}")
                 elif r.get("status") == "ingested":
                     print(f"  {r['title']}: {r['chunks']} chunks, {r['methods']} methods, {r['datasets']} datasets, "
-                          f"{r['claims']} claims, {r['findings']} findings, {r['limitations']} limitations, "
-                          f"{r['cross_paper_links']} cross-paper links ({r['extractor']})")
+                          f"{r['claims']} claims, {r['findings']} findings, {r['limitations']} limitations "
+                          f"({r['extractor']})")
                 else:
                     print(f"  {r.get('title')}: unchanged (use --force to re-ingest)")
         print(store.stats())

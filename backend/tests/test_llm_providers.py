@@ -9,12 +9,12 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app import database
 from app.main import app
 from app.services import investigation_service
 from app.services.investigation_service import InvestigationManager
+from authclient import new_client, sign_up
 from fakes import CHUNKS, P1, P2, FakeStore, FakeTools
 from researchmind import llm as llm_mod
 from researchmind.agent import Investigator
@@ -246,11 +246,18 @@ def test_grounded_no_relevant_evidence_skips_the_model():
 # ---------------------------------------------------------------------- API
 
 @pytest.fixture
-def client():
+def signed_in():
     database.reset_store()
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    client, _, pid = sign_up()
+    yield client, pid
+    for dep in (database.get_store, investigation_service.get_manager):
+        app.dependency_overrides.pop(dep, None)
     database.reset_store()
+
+
+@pytest.fixture
+def client(signed_in):
+    return signed_in[0]
 
 
 def test_llm_status_endpoint_and_health(client, monkeypatch):
@@ -261,20 +268,29 @@ def test_llm_status_endpoint_and_health(client, monkeypatch):
     assert st["provider"] == "ollama" and st["status"] == "unreachable" and st["model"] == "qwen2.5:1.5b"
     health = client.get("/api/health").json()
     assert health["config"]["llm"]["status"] == "unreachable" and health["config"]["llm_configured"] is True
-    assert "ANTHROPIC" not in json.dumps(health)
+    text = json.dumps(st) + json.dumps(health)
+    # Users never see internal URLs, installed models or operator commands.
+    assert "ANTHROPIC" not in text and "127.0.0.1" not in text and "ollama pull" not in text and "base_url" not in text
+    # Without a session, neither endpoint answers.
+    anonymous = new_client()
+    assert anonymous.get("/api/llm/status").status_code == 401 and anonymous.get("/api/health").status_code == 401
+    assert anonymous.get("/api/health/live").json() == {"status": "ok"}
 
 
-def test_api_reports_provider_and_requirements(client):
+def test_api_reports_provider_and_requirements(signed_in):
+    client, pid = signed_in
+    url = f"/api/projects/{pid}/investigations"
     store = FakeStore()
-    manager = InvestigationManager(1, 30, investigator_factory=lambda s, use_llm=True, time_budget_s=None:
+    manager = InvestigationManager(1, 30, investigator_factory=lambda s, **kw:
                                    Investigator(s, llm=ScriptedChat([report("S1", "R")]), tools=FakeTools()))
     app.dependency_overrides[database.get_store] = lambda: store
     app.dependency_overrides[investigation_service.get_manager] = lambda: manager
-    body = client.post("/api/investigations", json={"question": QUESTION, "requirements": "Must track infant temperature."}).json()
+    ask = {"question": QUESTION, "paper_id": P1, "wait": True}
+    body = client.post(url, json={**ask, "requirements": "Must track infant temperature."}).json()
     assert body["status"] == "completed" and body["mode"] == "llm"
     assert body["provider"] == "ollama" and body["model"] == "fake:1b" and body["requirements"] == "Must track infant temperature."
-    assert any("Using LLM ollama / fake:1b" in e["message"] for e in body["progress"])
-    r = client.post("/api/investigations", json={"question": QUESTION, "requirements": "x" * 3001})
+    assert any("AI model: fake:1b" in e["message"] for e in body["progress"])
+    r = client.post(url, json={**ask, "requirements": "x" * 3001})
     assert r.status_code == 422 and "requirements" in r.json()["error"]["message"]
 
 

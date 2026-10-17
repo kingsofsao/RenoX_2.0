@@ -97,7 +97,7 @@ def graph_stats(store: GraphStore) -> dict:
 
 
 def graph_overview(store: GraphStore, limit: int = 60) -> dict:
-    """Papers with their methods/datasets plus contradiction edges, for the React Flow view."""
+    """Papers with their own methods/datasets, for the React Flow view. Papers are never linked to each other."""
     rows = store.query(
         """MATCH (p:Paper) WHERE coalesce(p.status, 'processed') = 'processed' AND p.sha256 IS NOT NULL
            WITH p ORDER BY p.ingested_at DESC LIMIT $limit
@@ -113,13 +113,6 @@ def graph_overview(store: GraphStore, limit: int = 60) -> dict:
             nid = f"{kind}:{r['eid']}"
             nodes.setdefault(nid, {"id": nid, "type": kind, "label": r["ename"]})
             edges.append({"id": f"{r['pid']}->{nid}", "source": r["pid"], "target": nid, "type": r["rel"]})
-    conflicts = store.query(
-        """MATCH (pa:Paper)-[]->(a)-[x:CONTRADICTS]->(b)<-[]-(pb:Paper)
-           WHERE pa.id <> pb.id RETURN pa.id AS a, pb.id AS b, max(x.score) AS score""", read_only=True)
-    for c in conflicts:
-        if c["a"] in nodes and c["b"] in nodes:
-            edges.append({"id": f"conflict:{c['a']}:{c['b']}", "source": c["a"], "target": c["b"],
-                          "type": "CONTRADICTS", "score": round(float(c["score"]), 2)})
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
