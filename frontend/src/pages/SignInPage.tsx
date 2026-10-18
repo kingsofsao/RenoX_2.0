@@ -9,6 +9,7 @@ import { Alert, Button, Field, Input } from '../components/ui'
 import { useI18n } from '../i18n/I18nProvider'
 import { toApiError } from '../services/api'
 import { errorText } from '../services/errors'
+import { usePageMeta } from '../hooks/usePageMeta'
 
 export function SignInPage() {
   const { t } = useI18n()
@@ -19,6 +20,7 @@ export function SignInPage() {
   const [remember, setRemember] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  usePageMeta(t('auth.signin.title'), t('meta.signin.description'))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()

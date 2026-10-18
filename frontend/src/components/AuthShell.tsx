@@ -1,5 +1,6 @@
 // Split layout for sign-in and sign-up: a black brand panel and the form.
 import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { BookOpenCheck, Network, ShieldCheck } from 'lucide-react'
 import { useI18n } from '../i18n/I18nProvider'
 import { LanguageSelect, ThemeToggle } from './Preferences'
@@ -20,10 +21,10 @@ export function AuthShell({ title, subtitle, children, footer }: { title: string
         <div className="pointer-events-none absolute bottom-[-180px] end-[-120px] h-[420px] w-[420px] rounded-full bg-[#1c69d4]/20 blur-[110px]" />
         <div className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(#fff_1px,transparent_1px),linear-gradient(90deg,#fff_1px,transparent_1px)] [background-size:44px_44px]" />
         <div className="relative flex flex-1 flex-col justify-between p-12">
-          <div className="flex items-center gap-3">
+          <Link to="/" className="flex items-center gap-3">
             <Logo className="h-9 w-9" />
             <span className="text-lg font-semibold tracking-tight">ResearchMind <span className="text-[#5ea2ff]">AI</span></span>
-          </div>
+          </Link>
           <div className="animate-fade-up">
             <h2 className="max-w-md text-[34px] font-semibold leading-[1.15] tracking-tight">{t('auth.hero.title')}</h2>
             <p className="mt-4 max-w-md text-[15px] leading-relaxed text-white/65">{t('auth.hero.text')}</p>
@@ -35,25 +36,27 @@ export function AuthShell({ title, subtitle, children, footer }: { title: string
                   </span>
                   <span>
                     <span className="block text-sm font-medium">{pt}</span>
-                    <span className="block text-sm text-white/55">{text}</span>
+                    <span className="block text-sm text-white/65">{text}</span>
                   </span>
                 </li>
               ))}
             </ul>
           </div>
-          <div className="flex items-center gap-2 text-xs text-white/40">
-            <span className="h-px w-8 bg-[#1c69d4]" />
-            {t('auth.footer')}
-          </div>
+          <nav className="flex items-center gap-5 text-xs text-white/65" aria-label={t('footer.legal')}>
+            <span className="h-px w-8 bg-[#1c69d4]" aria-hidden />
+            <Link to="/" className="transition-colors hover:text-white">{t('auth.home')}</Link>
+            <Link to="/privacy" className="transition-colors hover:text-white">{t('legal.privacy')}</Link>
+            <Link to="/terms" className="transition-colors hover:text-white">{t('legal.terms')}</Link>
+          </nav>
         </div>
       </aside>
 
       <main className="flex flex-1 flex-col">
         <div className="flex items-center justify-between gap-3 px-5 py-4 sm:px-8">
-          <div className="flex min-w-0 items-center gap-2.5 lg:invisible">
+          <Link to="/" className="flex min-w-0 items-center gap-2.5 lg:invisible" aria-label="ResearchMind AI">
             <Logo className="h-8 w-8 shrink-0" />
             <span className="hidden whitespace-nowrap font-semibold tracking-tight text-fg sm:inline">ResearchMind AI</span>
-          </div>
+          </Link>
           <div className="flex items-center gap-2">
             <LanguageSelect />
             <ThemeToggle />

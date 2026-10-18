@@ -18,9 +18,12 @@
   --line-strong: #cdd2da;
   --fg: #0b0d11;
   --fg-muted: #4b5361;
-  --fg-subtle: #7b8494;
+  --fg-subtle: #5f6775;      /* 5.6:1 on white: readable for small text */
   --brand: #1c69d4;
   --brand-hover: #1559b8;
+  /* Filled blue under white text (buttons, badges): 5.2:1 in both themes. */
+  --brand-solid: #1c69d4;
+  --brand-solid-hover: #1559b8;
   --brand-strong: #0f4c9e;
   --brand-soft: #e8f0fc;
   --brand-fg: #0f4fa8;
@@ -34,9 +37,9 @@
   --bad: #c62828;
   --bad-soft: #fdecec;
   --bad-fg: #a31d1d;
-  --accent: #5b4bc4;        /* model hypotheses and the user's own requirements [R] */
-  --accent-soft: #efedfb;
-  --accent-fg: #4536a8;
+  --accent: #0f766e;        /* AI hypotheses and the user's own requirements [R] (teal, never purple) */
+  --accent-soft: #e6f4f1;
+  --accent-fg: #0b5c55;
   --shadow: 0 1px 2px rgb(11 13 17 / 0.05), 0 1px 3px rgb(11 13 17 / 0.06);
   --shadow-lg: 0 10px 30px -12px rgb(11 13 17 / 0.25);
   --sidebar: #050608;
@@ -44,7 +47,7 @@
   --sidebar-line: #1d2027;
   --graph-paper: #1c69d4;
   --graph-method: #0b0d11;
-  --graph-dataset: #7b8494;
+  --graph-dataset: #5f6775;
   color-scheme: light;
 }
 
@@ -57,9 +60,11 @@
   --line-strong: #343a45;
   --fg: #f2f4f7;
   --fg-muted: #a7afbd;
-  --fg-subtle: #7d8696;
+  --fg-subtle: #8b94a3;
   --brand: #2f7ff0;
   --brand-hover: #4b92f5;
+  --brand-solid: #1c69d4;
+  --brand-solid-hover: #1f6fe0;
   --brand-strong: #6aa6f8;
   --brand-soft: rgb(47 127 240 / 0.14);
   --brand-fg: #8fbcff;
@@ -73,9 +78,9 @@
   --bad: #f05252;
   --bad-soft: rgb(240 82 82 / 0.13);
   --bad-fg: #ff9b9b;
-  --accent: #9a8cf5;
-  --accent-soft: rgb(154 140 245 / 0.14);
-  --accent-fg: #c3baff;
+  --accent: #2dd4bf;
+  --accent-soft: rgb(45 212 191 / 0.12);
+  --accent-fg: #7fe3d4;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-lg: 0 16px 40px -12px rgb(0 0 0 / 0.7);
   --sidebar: #000000;
@@ -101,6 +106,8 @@
   --color-fg-subtle: var(--fg-subtle);
   --color-brand: var(--brand);
   --color-brand-hover: var(--brand-hover);
+  --color-brand-solid: var(--brand-solid);
+  --color-brand-solid-hover: var(--brand-solid-hover);
   --color-brand-strong: var(--brand-strong);
   --color-brand-soft: var(--brand-soft);
   --color-brand-fg: var(--brand-fg);
@@ -203,4 +210,25 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* Print: the report or page content only, black on white, no navigation, buttons or widgets. */
+@media print {
+  :root, .dark {
+    --canvas: #fff; --surface: #fff; --surface-2: #fff; --surface-3: #f2f2f2; --line: #ccc; --line-strong: #999;
+    --fg: #000; --fg-muted: #222; --fg-subtle: #444; --brand: #000; --brand-fg: #000; --brand-soft: #f2f2f2;
+    --shadow: none; --shadow-lg: none;
+  }
+  body { background: #fff !important; color: #000 !important; }
+  aside, nav, header, footer, button, [role="dialog"], [role="region"], [role="progressbar"] { display: none !important; }
+  main { padding: 0 !important; }
+  #content, #main { padding-inline-start: 0 !important; }
+  .shadow-card, .shadow-pop { box-shadow: none !important; }
+  a { color: #000 !important; text-decoration: underline; }
+  details { display: block; }
+  details > :not(summary) { display: block !important; }
+  section, article, li, tr, figure { break-inside: avoid; }
+  .animate-fade-up, .animate-fade-in, .animate-scale-in { animation: none !important; opacity: 1 !important; transform: none !important; }
+  .max-h-\[75vh\], .max-h-\[70vh\], .max-h-72, .max-h-60 { max-height: none !important; overflow: visible !important; }
+  @page { margin: 16mm; }
 }

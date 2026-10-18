@@ -311,7 +311,7 @@ class ResearchTools:
                 "type": "conflicting_evidence",
                 "title": f"Resolve conflicting results: {_trim(top['a'], 90)}",
                 "rationale": (f"'{top['pa']}' and '{top['pb']}' report opposing results on closely related statements "
-                              f"({len(conflicts)} conflicting statement pair(s)); a controlled comparison under shared evaluation settings is missing."),
+                              f"({len(conflicts)} conflicting statement {'pair' if len(conflicts) == 1 else 'pairs'}); a controlled comparison under shared evaluation settings is missing."),
                 "evidence": evidence,
                 "score": round(0.6 + 0.3 * float(top["score"]), 2), "_text": top["a"] + " " + top["b"]})
 

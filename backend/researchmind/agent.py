@@ -422,7 +422,7 @@ def _offline_report(question, papers, evidence, comparison, explored, details, g
         lines.append(f"The {len(papers)} ingested papers contain {sum(len(v) for v in by_paper.values())} claims/findings relevant to this question. The most relevant:")
         lines.append("")
         for s in key:
-            lines.append(f"- {s['text']} {_cite(s['chunk_id'])} — *{s['paper_title']}*")
+            lines.append(f"- {s['text']} {_cite(s['chunk_id'])} (*{s['paper_title']}*)")
     else:
         lines.append("The ingested papers contain little direct evidence on this question.")
     lines.append("")
@@ -443,7 +443,7 @@ def _offline_report(question, papers, evidence, comparison, explored, details, g
 
     for ex in explored:
         for m in ex.get("matches", []):
-            lines.append(f"**Graph traversal — {m['type']}: {m['entity']}** (used by {len(m['papers'])} papers)")
+            lines.append(f"**Graph traversal, {m['type']}: {m['entity']}** (used by {len(m['papers'])} papers)")
             for p in m["papers"]:
                 companions = p.get("datasets") or p.get("methods") or []
                 extra = f"; also uses {', '.join(companions)}" if companions else ""
@@ -474,12 +474,12 @@ def _offline_report(question, papers, evidence, comparison, explored, details, g
     lines.append("")
 
     lines += ["## Candidate Research Gaps", "",
-              "_Hypotheses derived from the ingested papers only — verify against the wider literature._", ""]
+              "_Hypotheses derived from the ingested papers only. Verify them against the wider literature._", ""]
     if not gaps:
         lines.append("No candidate gaps were found.")
     for g in gaps:
         cites = ", ".join(dict.fromkeys(e["chunk_id"] for e in g["evidence"] if e.get("chunk_id")))
-        lines.append(f"**{g['id']}. {g['title']}** — `{g['type'].replace('_', ' ')}`, score {g['score']}")
+        lines.append(f"**{g['id']}. {g['title']}** (`{g['type'].replace('_', ' ')}`), score {g['score']}")
         lines.append(f"- Why: {g['rationale']} [{cites}]")
         lines.append("")
 

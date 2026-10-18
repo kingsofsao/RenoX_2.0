@@ -99,7 +99,7 @@ def test_confidence_for_one_selected_paper():
     args = dict(mode="llm", findings=[{}], comparisons=[], sources=[{}] * 4, papers=1, corpus_size=1, unverified=0)
     scoped = assess_confidence(**args, scoped=True)
     assert scoped["level"] != "low"  # one paper is all that was asked for
-    assert any("1 selected paper" in u for u in scoped["uncertainties"])
+    assert any("Limited to the selected paper;" in u for u in scoped["uncertainties"])
     assert assess_confidence(**args)["level"] == "low"  # a whole library that holds only one paper
 
 
@@ -156,7 +156,7 @@ def test_confidence_for_one_selected_paper():
     args = dict(mode="llm", findings=[{}], comparisons=[], sources=[{}] * 4, papers=1, corpus_size=1, unverified=0)
     scoped = assess_confidence(**args, scoped=True)
     assert scoped["level"] != "low"  # one paper is all that was asked for
-    assert any("1 selected paper" in u for u in scoped["uncertainties"])
+    assert any("Limited to the selected paper;" in u for u in scoped["uncertainties"])
     assert assess_confidence(**args)["level"] == "low"  # the whole library has only one paper
 
 

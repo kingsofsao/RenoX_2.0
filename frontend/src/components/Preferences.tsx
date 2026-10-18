@@ -44,7 +44,7 @@ export function ThemeToggle({ className, tone = 'default' }: { className?: strin
             onClick={() => setTheme(value)}
             className={cx('rounded-md p-1.5 transition-all duration-150 active:scale-90',
               active ? (tone === 'dark' ? 'bg-white/15 text-white' : 'bg-surface text-fg shadow-sm')
-                : tone === 'dark' ? 'text-white/55 hover:text-white' : 'text-fg-subtle hover:text-fg')}>
+                : tone === 'dark' ? 'text-white/65 hover:text-white' : 'text-fg-subtle hover:text-fg')}>
             <Icon className="h-4 w-4" />
             <span className="sr-only">{t(`theme.${value}`)}</span>
           </button>

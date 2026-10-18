@@ -68,7 +68,7 @@ describe('buildMarkdownExport', () => {
       '## Limitations of the evidence', '## Confidence', '## Full AI analysis', '## Sources', '## Investigation trace']) {
       expect(md).toContain(h)
     }
-    expect(md).toContain('1. *Paper A* (2024), p. 2, Results — "GAT generalizes well." `p_aaaaaaaaaaa1:c004`')
+    expect(md).toContain('1. *Paper A* (2024), p. 2, Results: "GAT generalizes well." `p_aaaaaaaaaaa1:c004`')
     expect(md).toContain('not confirmed novel findings')
     expect(md).toContain('**Confidence: Moderate confidence**')
     expect(md).toContain('- **Paper:** Paper A (`p_aaaaaaaaaaa1`)')

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import secrets
+import time
 import unicodedata
 
 from argon2 import PasswordHasher
@@ -104,3 +106,33 @@ def token_hash(token: str) -> str:
 def same(a: str | None, b: str | None) -> bool:
     """Timing-safe string comparison."""
     return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
+
+
+# --- spam protection for public forms (sign-up, contact) -------------------------------------------
+# The form fetches a signed, timestamped challenge when it opens and sends it back on submit. Bots that
+# post directly have no valid challenge; bots that fill the form instantly fail the minimum fill time.
+# Together with the hidden honeypot field and the per-IP rate limits this stops automated submissions
+# without third-party CAPTCHAs.
+FORM_MIN_SECONDS = max(0, int(os.getenv("FORM_MIN_SECONDS", "3")))
+FORM_MAX_SECONDS = 2 * 3600
+_FORM_KEY = (os.getenv("SECRET_KEY") or "").encode() or secrets.token_bytes(32)
+
+
+def _sign(payload: str) -> str:
+    return hmac.new(_FORM_KEY, payload.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def issue_form_challenge(now: float | None = None) -> str:
+    ts = str(int(now if now is not None else time.time()))
+    nonce = secrets.token_hex(8)
+    return f"{ts}.{nonce}.{_sign(f'{ts}.{nonce}')}"
+
+
+def check_form_challenge(token: str | None, now: float | None = None) -> bool:
+    """True when the challenge was issued by this server between FORM_MIN_SECONDS and FORM_MAX_SECONDS ago."""
+    try:
+        ts, nonce, sig = (token or "").split(".")
+        age = (now if now is not None else time.time()) - int(ts)
+    except ValueError:
+        return False
+    return hmac.compare_digest(sig, _sign(f"{ts}.{nonce}")) and FORM_MIN_SECONDS <= age <= FORM_MAX_SECONDS

@@ -150,7 +150,7 @@ type Variant = 'primary' | 'secondary' | 'danger' | 'ghost' | 'dark'
 type Size = 'sm' | 'md' | 'lg'
 
 const variantStyles: Record<Variant, string> = {
-  primary: 'bg-brand text-white shadow-sm hover:bg-brand-hover hover:shadow-md hover:-translate-y-px disabled:bg-brand/45 disabled:shadow-none disabled:translate-y-0',
+  primary: 'bg-brand-solid text-white shadow-sm hover:bg-brand-solid-hover hover:shadow-md hover:-translate-y-px disabled:bg-brand-solid/45 disabled:shadow-none disabled:translate-y-0',
   secondary: 'bg-surface text-fg ring-1 ring-inset ring-line-strong hover:bg-surface-2 hover:ring-fg-subtle disabled:text-fg-subtle',
   danger: 'bg-surface text-bad-fg ring-1 ring-inset ring-bad/35 hover:bg-bad-soft disabled:opacity-50',
   ghost: 'text-fg-muted hover:bg-surface-3 hover:text-fg disabled:opacity-40',

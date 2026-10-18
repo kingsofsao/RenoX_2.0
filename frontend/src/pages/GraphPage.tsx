@@ -1,11 +1,12 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Background, Controls, MiniMap, Position, ReactFlow, type Edge, type Node } from '@xyflow/react'
+import { Background, Controls, MiniMap, Position, ReactFlow, useNodesState, type Edge, type Node } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { Network, RefreshCw } from 'lucide-react'
 import { DatabaseNotice } from '../components/DatabaseNotice'
 import { Alert, Button, Card, EmptyState, LoadingBlock, PageHeader } from '../components/ui'
 import { useAsync } from '../hooks/useAsync'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useI18n } from '../i18n/I18nProvider'
 import { api } from '../services/api'
 import { errorText } from '../services/errors'
@@ -62,10 +63,39 @@ function layout(data: GraphOverview, dark: boolean): { nodes: Node[]; edges: Edg
   return { nodes, edges }
 }
 
+const isPaper = (id: string) => id.startsWith('p_') && !id.includes(':')
+
+/**
+ * The canvas keeps its own node state so React Flow can record each node's measured size
+ * (the minimap and fitView need it); the layout is replaced whenever the data or theme changes.
+ */
+function GraphCanvas({ flow, dark }: { flow: { nodes: Node[]; edges: Edge[] }; dark: boolean }) {
+  const navigate = useNavigate()
+  const colors = palette(dark)
+  const [nodes, setNodes, onNodesChange] = useNodesState(flow.nodes)
+  useEffect(() => setNodes(flow.nodes), [flow, setNodes])
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={flow.edges}
+      onNodesChange={onNodesChange}
+      fitView
+      colorMode={dark ? 'dark' : 'light'}
+      nodesConnectable={false}
+      onNodeClick={(_, node) => { if (isPaper(node.id)) navigate(`/papers/${node.id}`) }}
+      proOptions={{ hideAttribution: true }}
+    >
+      <Background gap={22} color={dark ? '#1c2027' : '#e3e6eb'} />
+      <Controls showInteractive={false} />
+      <MiniMap pannable zoomable nodeColor={(n) => (isPaper(n.id) ? colors.paper.border : n.id.startsWith('method') ? colors.method.border : colors.dataset.border)} />
+    </ReactFlow>
+  )
+}
+
 export default function GraphPage() {
   const { t } = useI18n()
+  usePageMeta(t('graph.title'), undefined, { noindex: true })
   const { resolved } = useTheme()
-  const navigate = useNavigate()
   const { data, error, loading, reload } = useAsync(() => api.graphOverview(60), [])
   const dark = resolved === 'dark'
   const flow = useMemo(() => (data ? layout(data, dark) : null), [data, dark])
@@ -84,19 +114,7 @@ export default function GraphPage() {
             <div className="p-5"><Alert tone="error" title={t('graph.loadFailed')}>{errorText(t, error)}</Alert></div>
           ) : flow && flow.nodes.length > 0 ? (
             <div className="h-[70vh] min-h-[420px]" dir="ltr">
-              <ReactFlow
-                nodes={flow.nodes}
-                edges={flow.edges}
-                fitView
-                colorMode={dark ? 'dark' : 'light'}
-                nodesConnectable={false}
-                onNodeClick={(_, node) => { if (node.id.startsWith('p_') && !node.id.includes(':')) navigate(`/papers/${node.id}`) }}
-                proOptions={{ hideAttribution: true }}
-              >
-                <Background gap={22} color={dark ? '#1c2027' : '#e3e6eb'} />
-                <Controls showInteractive={false} />
-                <MiniMap pannable zoomable nodeColor={(n) => (n.id.startsWith('p_') && !n.id.includes(':') ? colors.paper.border : n.id.startsWith('method') ? colors.method.border : colors.dataset.border)} />
-              </ReactFlow>
+              <GraphCanvas flow={flow} dark={dark} />
             </div>
           ) : (
             <EmptyState icon={<Network className="h-6 w-6" />} title={t('graph.empty.title')} description={t('graph.empty.text')} />

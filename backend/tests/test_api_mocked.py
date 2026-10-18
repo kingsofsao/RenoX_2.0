@@ -5,6 +5,7 @@ with a stand-in object, so these exercise validation, error handling and parsing
 """
 
 import io
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -102,6 +103,24 @@ def test_upload_limits_file_count(client, papers_url, monkeypatch):
              for i in range(get_api_settings().max_files_per_upload + 1)]
     r = client.post(f"{papers_url}/upload", files=files)
     assert r.status_code == 400 and "Too many files" in r.json()["error"]["message"]
+
+
+def test_slow_upload_batches_are_streamed(client, papers_url, sample_pdfs, monkeypatch):
+    """A batch that outlasts the keep-alive interval sends spaces first, so proxies (Vercel: 120 s) keep the request open."""
+    from app.routes import papers
+
+    def slow(staged, store, project):
+        time.sleep(0.3)
+        return {"filename": staged.filename, "status": "failed", "paper_id": staged.paper_id,
+                "message": "Could not read the PDF.", "error_code": "parse_failed"}
+    monkeypatch.setattr(papers, "KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(papers, "process_upload", slow)
+    app.dependency_overrides[database.get_store] = lambda: MagicMock()
+    r = client.post(f"{papers_url}/upload",
+                    files=[("files", ("a.pdf", sample_pdfs[0].read_bytes(), "application/pdf"))])
+    assert r.status_code == 200 and r.text.startswith(" ")
+    body = r.json()
+    assert body["summary"]["failed"] == 1 and body["results"][0]["filename"] == "a.pdf"
 
 
 def test_upload_requires_files(client, papers_url):

@@ -110,7 +110,7 @@ The first upload after startup can take a few seconds longer because the embeddi
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `FALKORDB_URL` | — (required) | FalkorDB connection URL |
+| `FALKORDB_URL` | required | FalkorDB connection URL |
 | `ENVIRONMENT` | `development` | `production` turns on Secure `__Host-` cookies and HSTS, and turns off `/docs` |
 | `COOKIE_SECURE` | `false` | Secure cookies outside production (only when served over HTTPS) |
 | `SESSION_TTL_HOURS` / `SESSION_IDLE_HOURS` | `168` / `24` | Absolute session lifetime / sign-out after inactivity |
@@ -126,7 +126,7 @@ The first upload after startup can take a few seconds longer because the embeddi
 | `RESEARCHMIND_DATA_DIR` | `<repo>/data` | Uploads, page text, extraction dumps |
 | `EMBEDDING_BACKEND` / `EMBEDDING_MODEL` | `auto` / MiniLM-L6-v2 | Semantic vectors |
 | `LLM_PROVIDER` | `auto` | Investigation LLM: `ollama`, `anthropic`, `none`. `auto` = anthropic if `ANTHROPIC_API_KEY` is set, else none. With `AI_REQUIRED=true` a provider must be configured |
-| `LLM_MODEL` | — | Model name, e.g. `qwen3:8b` for Ollama (must be pulled first). For anthropic it overrides `ANTHROPIC_MODEL` |
+| `LLM_MODEL` | none | Model name, e.g. `qwen3:8b` for Ollama (must be pulled first). For anthropic it overrides `ANTHROPIC_MODEL` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama API |
 | `LLM_TIMEOUT_SECONDS` | `300` | Per model request. CPU-only machines need 600+ |
 | `LLM_MAX_OUTPUT_TOKENS` / `LLM_CONTEXT_TOKENS` | `1024` / `8192` | Report length cap / model context window (Ollama `num_ctx`) |
@@ -155,6 +155,11 @@ automatically). A project of another account always answers 404, so its existenc
 | GET / PATCH / DELETE | `/api/auth/me` | Profile · change `{name, language, theme}` · delete the account and all its data (body `{password}`) |
 | POST | `/api/auth/password` | `{current_password, new_password}`; signs out every other session |
 | GET / DELETE | `/api/auth/sessions` | Active sessions · sign out all other devices |
+| GET | `/api/auth/session` | `{user}` for the signed-in account or `{user: null}` for a visitor (the app's start-up check) |
+| GET | `/api/forms/challenge` | Signed time challenge for the sign-up and contact forms (spam protection) |
+| POST | `/api/contact` | `{name, email, topic, message, challenge, website}`; 202 |
+| POST | `/api/analytics/event` | `{event, path, utm_*}`; sent only after the visitor allows statistics; stores daily counts, never IPs or ids |
+| GET | `/api/admin/analytics?days=` · `/api/admin/messages` | Site statistics and contact messages; accounts in `ADMIN_EMAILS` only (404 for everyone else) |
 | GET / POST | `/api/projects` | The account's projects (with counts) · create `{name, description}` |
 | GET / PATCH / DELETE | `/api/projects/{id}` | Read · rename/describe · delete with body `{confirm_name}` (exact name; 409 while an investigation runs) |
 | POST | `/api/projects/{id}/papers/upload` | Multipart field `files`. A result per file: `processed`, `duplicate`, `failed` or `rejected` |
@@ -217,21 +222,98 @@ The graph still holds everything needed for reasoning: page-anchored `Chunk` evi
 
 ## Deployment
 
-The repository ships a production stack: `docker-compose.yml` (FalkorDB → API → nginx serving the built React app).
+The repository ships a production stack in `docker-compose.yml`:
+**Caddy (HTTPS) → nginx serving the built React app → FastAPI → FalkorDB**. Only Caddy is published (ports 80 and 443);
+the web server, the API and the database are reachable on the internal Docker network only.
 
-1. On a server with Docker, copy `backend/.env.example` to `backend/.env` and set at least:
-   `ENVIRONMENT=production`, `ALLOWED_ORIGINS=https://your-domain`, and the AI provider
-   (`LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`, or Ollama via `OLLAMA_BASE_URL`).
-2. `export FALKORDB_PASSWORD=$(openssl rand -hex 32)` and `docker compose up -d --build`.
-   FalkorDB is password-protected and only reachable on the internal network; the API is not published either.
-3. Put HTTPS in front of port 8080 (Caddy, a cloud load balancer, or nginx + certbot). Cookies are `Secure`, so the site
-   must be served over HTTPS.
-4. Keep one API process (investigations and their progress are held in memory). Back up the `falkordb-data` and
-   `app-data` volumes. Check dependencies with `pip-audit -r backend/requirements.txt` and `npm audit`.
+1. **Domain.** Point your domain's DNS `A`/`AAAA` records (and `www`, optional) at the server.
+2. **Settings.** On the server:
+   ```bash
+   cp .env.example .env                    # DOMAIN, ACME_EMAIL, FALKORDB_PASSWORD (openssl rand -hex 32), OPERATOR_NAME, CONTACT_EMAIL
+   cp backend/.env.example backend/.env    # AI provider, ADMIN_EMAILS, limits
+   ```
+   In `backend/.env` set the AI provider (`LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`, or Ollama via `OLLAMA_BASE_URL`)
+   and `ADMIN_EMAILS` (the accounts that may open *Site statistics*). `ENVIRONMENT=production` and
+   `ALLOWED_ORIGINS=https://$DOMAIN` are set by the compose file.
+3. **Start.** `docker compose up -d --build`. Caddy obtains and renews the Let's Encrypt certificate itself, redirects
+   `http://` to `https://` and `www.` to the bare domain. The build bakes `https://$DOMAIN` into the canonical links,
+   social previews, `sitemap.xml` and `robots.txt`.
+4. **Operate.** Keep one API process (investigations and their progress are held in memory). Back up the
+   `falkordb-data`, `app-data` and `caddy-data` volumes. Check dependencies with `pip-audit -r backend/requirements.txt`
+   and `npm audit`.
 
-`frontend/nginx.conf` sets a strict Content-Security-Policy (no inline or third-party scripts), HSTS, `frame-ancestors 'none'`,
-caches fingerprinted assets, never serves source maps or dotfiles, and overwrites `X-Forwarded-For` so client IPs used for
+`frontend/nginx.conf` (with `security-headers.conf` on every response) sets a strict Content-Security-Policy (no inline
+or third-party scripts), HSTS, `frame-ancestors 'none'`, caches fingerprinted assets for a year and images for a week,
+answers unknown paths with a real **404** status (the app's not-found page), never serves source maps or dotfiles, and
+takes the visitor's address from `X-Forwarded-For` only when it comes from a private-network proxy, so client IPs used for
 rate limiting cannot be spoofed. The API container runs as a non-root user with a read-only filesystem and no capabilities.
+
+### Alternative: Vercel (web app) + Render (API) + FalkorDB Cloud
+
+`frontend/vercel.json` serves the built app with the same headers as `nginx.conf` and proxies `/api/*` to the API on
+Render, so the browser still talks to one origin (first-party cookies, no CORS). Vercel adds a secret
+`x-origin-secret` header to every proxied request; with `ORIGIN_SECRET` set, the API answers anything without it with
+404, and takes the visitor's address for rate limits from Vercel's `x-real-ip`. Uploads that take longer than Vercel's
+120-second proxy limit are answered as a stream that keeps the connection open.
+
+1. **Database.** Create a FalkorDB Cloud instance and copy its connection URL (`falkors://default:PASSWORD@HOST:PORT`).
+2. **API on Render.** Push the repository to GitHub. Render dashboard -> **New -> Blueprint** -> pick the repository
+   (`render.yaml`). Fill in `ALLOWED_ORIGINS` (your Vercel address, e.g. `https://researchmind.vercel.app`),
+   `FALKORDB_URL`, `ADMIN_EMAILS` and `ANTHROPIC_API_KEY`. Note the service address (e.g.
+   `https://researchmind-api.onrender.com`) and copy the generated `ORIGIN_SECRET` from the service's Environment tab.
+3. **Web app on Vercel.** If the Render address differs from `https://researchmind-api.onrender.com`, change the
+   `dest` of the `/api/(.*)` route in `frontend/vercel.json`. Vercel -> **Add New -> Project** -> import the repository,
+   **Root Directory** `frontend`. Environment variables: `ORIGIN_SECRET` (the value from Render), `VITE_SITE_URL`
+   (your Vercel address), `VITE_OPERATOR_NAME`, `VITE_CONTACT_EMAIL`. Deploy.
+4. **Check.** `https://<render address>/api/health` must answer 404 (direct access refused), and the site must sign up,
+   upload and investigate normally.
+
+`render.yaml` uses Render's **free** plan: the image is built with `EMBEDDINGS=light` (no PyTorch; built-in hashing
+embedder) to fit in 512 MB, the service sleeps after 15 minutes without traffic, and its disk is wiped on every
+restart or deploy. Accounts, projects, knowledge graphs and investigations live in FalkorDB and are kept; uploaded PDFs
+and their page text are not (the paper page then says the text is unavailable). For real users choose a paid plan,
+add a persistent disk mounted at `/data`, and drop `EMBEDDINGS`/`EMBEDDING_BACKEND` to use the full embedding model
+(about 1 GB of memory).
+
+### Before launch
+
+Things only you can do:
+
+- [ ] Register the domain, point DNS at the server, fill in `.env` and start the stack (above).
+- [ ] Put your real name or company and a monitored address in `OPERATOR_NAME` and `CONTACT_EMAIL`: they appear in the
+      Privacy Policy, the Terms and the contact form.
+- [ ] Have the Privacy Policy and Terms (`frontend/src/i18n/legal/en.ts`) reviewed for your jurisdiction. They describe
+      exactly what this code does, but they are not legal advice. Translations say the English version prevails.
+      Change `legalUpdated` in `frontend/src/config/site.ts` whenever you edit them.
+- [ ] Sign up with an address listed in `ADMIN_EMAILS` to read contact messages and site statistics.
+- [ ] After launch, submit `https://<domain>/sitemap.xml` in Google Search Console and check the social preview with a
+      link-preview debugger.
+
+## Public site and launch checklist
+
+| Item | Where |
+|---|---|
+| Landing page with one call to action ("Create your account"), real product screenshots, expandable FAQ | `pages/LandingPage.tsx` |
+| Privacy Policy and Terms (9 languages, last-updated date, table of contents) | `pages/LegalPage.tsx`, `i18n/legal/` |
+| Custom 404 (real 404 status from nginx) | `pages/NotFoundPage.tsx`, `nginx.conf` |
+| Meta title and description per page, canonical links, Open Graph / Twitter cards, 1200x630 social image | `hooks/usePageMeta.ts`, `index.html`, `public/og-image.png` |
+| Favicon (SVG, ICO, Apple touch icon, maskable PWA icons, web manifest) | `public/` |
+| `sitemap.xml` and `robots.txt` generated at build time from `VITE_SITE_URL` | `vite.config.ts` |
+| Images: alt text on every image, WebP, 640px and 1200px variants with `srcset`, explicit sizes (no layout shift) | `public/images/` |
+| Cookie banner (essential only / allow statistics), changeable later from the footer and Settings | `components/ConsentBanner.tsx` |
+| Analytics: cookieless, consent-gated daily counts (page views, sign-ups, uploads, investigations), UTM campaign capture, admin view with chart and table | `services/analytics.ts`, `routes/site.py`, `pages/AdminPage.tsx` |
+| Contact: floating button and footer link, form validation, success and error states | `components/ContactWidget.tsx` |
+| Spam protection on sign-up and contact: signed time challenge, honeypot field, per-IP limits | `security.py`, `routes/site.py` |
+| Site search (Ctrl/Cmd+K over pages, papers and investigations) | `components/CommandPalette.tsx` |
+| Dark mode toggle, sticky headers, mobile menu, skip to content, back to top, scroll progress bar | `PublicLayout.tsx`, `Layout.tsx`, `ScrollAids.tsx` |
+| Copy buttons (answer, quotes, Markdown report, paper id), confirmation dialogs for destructive actions | `CopyButton.tsx`, `Modal.tsx` |
+| Password visibility toggle, form error and success states, loading animations and progress bars, hover states | `PasswordField.tsx`, `ui.tsx` |
+| Print stylesheet (report only, black on white) | `index.css` |
+| No secrets in the front end: API keys stay on the server; the build contains only the public site URL, operator name and contact address | `frontend/.env.example` |
+
+Measured on the production build (Lighthouse 12, public pages): desktop 100 performance / 100 accessibility /
+100 best practices / 100 SEO; mobile 90-94 performance and 100 for the rest. axe-core finds no WCAG 2.1 A/AA violations on
+any public or signed-in page in either theme.
 
 ## Tests
 

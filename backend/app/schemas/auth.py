@@ -22,6 +22,8 @@ class SignUpRequest(_Strict):
     name: str = Field(..., min_length=1, max_length=80)
     language: Language = "en"
     theme: Theme = "system"
+    challenge: str = Field("", max_length=120, description="Signed form challenge from GET /api/forms/challenge")
+    website: str = Field("", max_length=200, description="Honeypot: must stay empty (hidden from people)")
 
 
 class SignInRequest(_Strict):
@@ -52,6 +54,12 @@ class UserOut(BaseModel):
     theme: Theme
     language: Language
     created_at: str
+    is_admin: bool = False
+
+
+class SessionState(BaseModel):
+    """Who is signed in on this browser: the user, or null for a visitor."""
+    user: UserOut | None = None
 
 
 class SessionOut(BaseModel):

@@ -10,6 +10,7 @@ import type { MessageKey } from '../i18n/en'
 import { api } from '../services/api'
 import { plain, splitCitations } from '../services/report'
 import type { InvestigationResultBody, InvestigationSource } from '../types/api'
+import { CopyButton } from './CopyButton'
 import { Alert, Badge, Card, CardHeader, cx } from './ui'
 
 // ------------------------------------------------------------------ citations
@@ -21,7 +22,7 @@ export function CitationChip({ n }: { n: number }) {
   const focus = useContext(CiteContext)
   return (
     <button type="button" onClick={() => focus(n)} title={t('result.showSource', { n })}
-      className="mx-0.5 inline-flex min-w-[1.5rem] items-center justify-center rounded bg-brand-soft px-1 align-baseline text-[11px] font-semibold tabular-nums text-brand-fg ring-1 ring-inset ring-brand/25 transition-all hover:bg-brand hover:text-white active:scale-90">
+      className="mx-0.5 inline-flex min-w-[1.5rem] items-center justify-center rounded bg-brand-soft px-1 align-baseline text-[11px] font-semibold tabular-nums text-brand-fg ring-1 ring-inset ring-brand/25 transition-all hover:bg-brand-solid hover:text-white active:scale-90">
       {n}
     </button>
   )
@@ -275,7 +276,7 @@ function SourceItem({ s, open, onToggle }: { s: InvestigationSource; open: boole
   return (
     <li id={`source-${s.n}`} className={cx('scroll-mt-24 rounded-lg border transition-colors', open ? 'border-brand/40 bg-brand-soft/40' : 'border-line hover:border-line-strong')}>
       <button type="button" onClick={onToggle} className="flex w-full items-start gap-3 px-3 py-2.5 text-start" aria-expanded={open}>
-        <span className="mt-0.5 inline-flex h-5 min-w-[1.5rem] items-center justify-center rounded bg-brand px-1 text-[11px] font-semibold text-white">{s.n}</span>
+        <span className="mt-0.5 inline-flex h-5 min-w-[1.5rem] items-center justify-center rounded bg-brand-solid px-1 text-[11px] font-semibold text-white">{s.n}</span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-fg">{s.paper_title ?? s.paper_id}</span>
           <span className="text-xs text-fg-subtle">
@@ -294,6 +295,7 @@ function SourceItem({ s, open, onToggle }: { s: InvestigationSource; open: boole
               <ExternalLink className="h-3.5 w-3.5" /> {s.page ? t('result.openPdfAt', { page: s.page }) : t('paper.openPdf')}
             </a>
             <code className="text-fg-subtle" title={t('result.chunkId')}>{s.chunk_id}</code>
+            <CopyButton text={`"${s.quote}" (${s.paper_title ?? s.paper_id}${s.page ? `, ${t('result.page', { page: s.page })}` : ''})`} label={t('copy.quote')} />
           </div>
         </div>
       )}
@@ -342,7 +344,7 @@ export function InvestigationResultView({ result: r, model }: { result: Investig
         <Card className="animate-fade-up overflow-hidden border-brand/25">
           <div className="h-1 bg-gradient-to-r from-brand via-brand-strong to-transparent" />
           <CardHeader title={t('result.summary')} subtitle={t('result.summary.subtitle', { sources: r.sources.length })}
-            action={<ConfidenceBadge level={r.confidence.level} />} />
+            action={<div className="flex items-center gap-2 print:hidden"><CopyButton text={() => plain(r.summary)} /><ConfidenceBadge level={r.confidence.level} /></div>} />
           <div className="space-y-2 p-5 text-[15px] leading-relaxed text-fg" dir="auto">
             {r.summary.split('\n').filter((l) => l.trim()).map((line, i) => (
               <p key={i} className={cx(line.trim().startsWith('- ') && 'ps-3')}><CitedText text={line.replace(/^\s*-\s+/, '• ')} /></p>
@@ -361,7 +363,10 @@ export function InvestigationResultView({ result: r, model }: { result: Investig
                 {showReport ? <ChevronDown className="h-4 w-4 text-fg-subtle" /> : <ChevronRight className="h-4 w-4 text-fg-subtle rtl:rotate-180" />}
               </button>
               {showReport && (
-                <div className="max-h-[75vh] animate-fade-in overflow-auto border-t border-line p-5"><MarkdownReport markdown={r.report_markdown} /></div>
+                <div className="max-h-[75vh] animate-fade-in overflow-auto border-t border-line p-5 print:max-h-none">
+                  <div className="mb-3 flex justify-end print:hidden"><CopyButton text={r.report_markdown} label={t('copy.markdown')} /></div>
+                  <MarkdownReport markdown={r.report_markdown} />
+                </div>
               )}
             </Card>
             <Findings r={r} />

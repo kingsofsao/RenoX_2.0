@@ -32,6 +32,7 @@ from fakes import FakeStore, FakeTools  # noqa: E402
 from researchmind.accounts import MemoryAccounts  # noqa: E402
 from researchmind.agent import Investigator  # noqa: E402
 from researchmind.projects import MemoryRegistry  # noqa: E402
+from researchmind.site import MemorySiteStore  # noqa: E402
 
 
 class PacedTools(FakeTools):
@@ -49,6 +50,8 @@ manager = InvestigationManager(2, 60, investigator_factory=lambda s, time_budget
 app.dependency_overrides[database.get_store] = lambda: store
 app.dependency_overrides[database.get_registry] = lambda: registry
 app.dependency_overrides[auth.get_accounts] = lambda: accounts
+site_store = MemorySiteStore()
+app.dependency_overrides[auth.get_site] = lambda: site_store
 app.dependency_overrides[investigation_service.get_manager] = lambda: manager
 project_routes.store_for = lambda project: store
 health.check_database = lambda: {"status": "connected", "graph": "MOCK", "latency_ms": 0.1, "message": None}

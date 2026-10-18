@@ -2,7 +2,10 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Check, KeyRound, Laptop, LogOut, Monitor, Moon, Palette, Sun, Trash2, UserRound } from 'lucide-react'
 import { useAuth } from '../auth/AuthProvider'
+import { ConfirmDialog } from '../components/Modal'
+import { openCookieSettings } from '../components/ConsentBanner'
 import { PasswordInput, PasswordStrength, passwordChecks } from '../components/PasswordField'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { Alert, Badge, Button, Card, CardHeader, Field, Input, PageHeader, Select, cx } from '../components/ui'
 import { useI18n } from '../i18n/I18nProvider'
 import { LANGUAGES, isLang } from '../i18n/languages'
@@ -85,6 +88,11 @@ function AppearanceSection() {
             })}
           </div>
         </div>
+        <div>
+          <p className="mb-1 text-sm font-medium text-fg">{t('consent.settings')}</p>
+          <p className="mb-2 text-xs text-fg-subtle">{t('settings.cookies.hint')}</p>
+          <Button variant="secondary" size="sm" onClick={openCookieSettings}>{t('settings.cookies.change')}</Button>
+        </div>
         <Field label={t('settings.language')} htmlFor="s-lang" hint={t('settings.language.hint')}>
           <Select id="s-lang" value={lang} onChange={(e) => { if (isLang(e.target.value)) setLanguage(e.target.value) }} className="sm:max-w-xs">
             {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
@@ -150,6 +158,7 @@ function SessionsSection() {
   const { t, formatDate } = useI18n()
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [busy, setBusy] = useState(false)
+  const [asking, setAsking] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const load = () => api.listSessions().then((r) => setSessions(r.sessions)).catch((err) => setError(errorText(t, err)))
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -157,7 +166,7 @@ function SessionsSection() {
   const others = (sessions ?? []).filter((s) => !s.current).length
   const revoke = async () => {
     setBusy(true); setError(null)
-    try { await api.signOutOtherSessions(); await load() } catch (err) { setError(errorText(t, err)) } finally { setBusy(false) }
+    try { await api.signOutOtherSessions(); await load() } catch (err) { setError(errorText(t, err)) } finally { setBusy(false); setAsking(false) }
   }
   return (
     <Section icon={<Laptop className="h-4 w-4" />} title={t('settings.sessions')} subtitle={t('settings.sessions.subtitle')}>
@@ -175,9 +184,11 @@ function SessionsSection() {
         ))}
         {sessions === null && <li className="px-4 py-3"><div className="skeleton h-4 w-1/2" /></li>}
       </ul>
-      <Button variant="secondary" className="mt-4" onClick={() => void revoke()} loading={busy} disabled={!others}>
+      <Button variant="secondary" className="mt-4" onClick={() => setAsking(true)} disabled={!others}>
         <LogOut className="h-4 w-4" /> {t('settings.sessions.revoke')}
       </Button>
+      <ConfirmDialog open={asking} onCancel={() => setAsking(false)} onConfirm={() => void revoke()} busy={busy}
+        title={t('settings.sessions.revoke')} description={t('settings.sessions.confirm')} confirmLabel={t('settings.sessions.revoke.short')} />
     </Section>
   )
 }
@@ -192,8 +203,7 @@ function DangerSection() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const word = t('settings.delete.word')
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
+  const submit = async () => {
     setBusy(true); setError(null)
     try {
       await api.deleteAccount(password)
@@ -210,26 +220,18 @@ function DangerSection() {
       <CardHeader title={<span className="flex items-center gap-2 text-bad-fg"><Trash2 className="h-4 w-4" />{t('settings.delete')}</span>}
         subtitle={t('settings.delete.subtitle')} />
       <div className="p-5">
-        {!open ? (
-          <Button variant="danger" onClick={() => setOpen(true)}>{t('settings.delete.start')}</Button>
-        ) : (
-          <form onSubmit={submit} className="space-y-4 sm:max-w-md">
-            <Alert tone="error">{t('settings.delete.warning')}</Alert>
-            {error && <Alert tone="error">{error}</Alert>}
-            <Field label={t('auth.password')} htmlFor="d-password">
-              <PasswordInput id="d-password" value={password} onChange={setPassword} autoComplete="current-password" />
-            </Field>
-            <Field label={t('settings.delete.type', { word })} htmlFor="d-confirm">
-              <Input id="d-confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />
-            </Field>
-            <div className="flex gap-2">
-              <Button type="submit" variant="danger" loading={busy} disabled={!password || confirm.trim().toLowerCase() !== word.toLowerCase()}>
-                {t('settings.delete.confirm')}
-              </Button>
-              <Button variant="ghost" onClick={() => { setOpen(false); setPassword(''); setConfirm('') }}>{t('common.cancel')}</Button>
-            </div>
-          </form>
-        )}
+        <Button variant="danger" onClick={() => setOpen(true)}>{t('settings.delete.start')}</Button>
+        <ConfirmDialog open={open} onCancel={() => { setOpen(false); setPassword(''); setConfirm(''); setError(null) }}
+          onConfirm={() => void submit()} title={t('settings.delete')} description={t('settings.delete.warning')}
+          confirmLabel={t('settings.delete.confirm')} busy={busy} error={error}
+          disabled={!password || confirm.trim().toLowerCase() !== word.toLowerCase()}>
+          <Field label={t('auth.password')} htmlFor="d-password">
+            <PasswordInput id="d-password" value={password} onChange={setPassword} autoComplete="current-password" />
+          </Field>
+          <Field label={t('settings.delete.type', { word })} htmlFor="d-confirm">
+            <Input id="d-confirm" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />
+          </Field>
+        </ConfirmDialog>
       </div>
     </Card>
   )
@@ -237,6 +239,7 @@ function DangerSection() {
 
 export function SettingsPage() {
   const { t } = useI18n()
+  usePageMeta(t('settings.title'), undefined, { noindex: true })
   return (
     <>
       <PageHeader title={t('settings.title')} description={t('settings.description')} />

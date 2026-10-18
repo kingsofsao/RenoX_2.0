@@ -1,0 +1,12 @@
+# Local test of the production stack. Use with:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+# Do not use on the server.
+services:
+  backend:
+    environment:
+      # Ollama running on this Windows machine, reached from inside the container.
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      ADMIN_EMAILS: varshiniepv@gmail.com
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

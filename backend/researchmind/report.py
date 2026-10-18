@@ -110,7 +110,7 @@ def finalize_citations(markdown: str, registry: dict[str, dict], lookup=None) ->
             section = f", {r['section']}" if r.get("section") else ""
             quote = (r.get("quote") or "").replace("\n", " ")
             quote = quote if len(quote) <= 220 else quote[:219] + "…"
-            lines.append(f"{r['n']}. *{r['paper']}*{year}{page}{section} — \"{quote}\" `{r['chunk_id']}`")
+            lines.append(f"{r['n']}. *{r['paper']}*{year}{page}{section}: \"{quote}\" `{r['chunk_id']}`")
         body = body.rstrip() + "\n" + "\n".join(lines) + "\n"
     return body, refs, warnings
 

@@ -39,11 +39,13 @@ function ProjectGate({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-/** Only signed-in users get past this; everyone else is sent to the sign-in page and back afterwards. */
-export function RequireAuth({ children }: { children: ReactNode }) {
+/** Only signed-in users get past this; everyone else is sent to the sign-in page and back afterwards.
+ *  `landing` is shown instead to signed-out visitors of the home page "/". */
+export function RequireAuth({ children, landing }: { children: ReactNode; landing?: ReactNode }) {
   const { status, user } = useAuth()
   const location = useLocation()
   if (status === 'loading') return <FullScreenLoader />
+  if ((status !== 'signed-in' || !user) && landing && location.pathname === '/') return <>{landing}</>
   if (status !== 'signed-in' || !user) {
     const next = location.pathname + location.search
     return <Navigate to={next && next !== '/' ? `/signin?next=${encodeURIComponent(next)}` : '/signin'} replace />

@@ -2,7 +2,9 @@
 
 The API runs as a single process (investigations and their live progress are held in memory), so
 an in-process limiter is exact. Behind a reverse proxy, run uvicorn with `--proxy-headers
---forwarded-allow-ips=<proxy ip>` so `request.client.host` is the real client address.
+--forwarded-allow-ips=<proxy ip>` so `request.client.host` is the real client address. Behind Vercel
+(ORIGIN_SECRET set, checked by the security middleware) the visitor's address comes from `x-real-ip`,
+which Vercel always overwrites; X-Forwarded-For there also carries whatever the client sent.
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ import time
 from collections import deque
 
 from fastapi import Request
+
+from .config import get_api_settings
 
 
 class RateLimited(Exception):
@@ -53,6 +57,10 @@ class SlidingWindow:
 
 
 def client_ip(request: Request) -> str:
+    if get_api_settings().origin_secret:
+        real = request.headers.get("x-real-ip", "").strip()
+        if real:
+            return real
     return request.client.host if request.client else "unknown"
 
 
@@ -64,9 +72,10 @@ class Limiters:
         self.auth = SlidingWindow(settings.auth_attempts_per_window, 15 * 60)
         self.uploads = SlidingWindow(settings.uploads_per_hour, 3600)
         self.investigations = SlidingWindow(settings.investigations_per_hour, 3600)
+        self.contact = SlidingWindow(settings.contact_per_hour, 3600)
 
     def reset(self) -> None:
-        for lim in (self.api, self.auth, self.uploads, self.investigations):
+        for lim in (self.api, self.auth, self.uploads, self.investigations, self.contact):
             lim.reset()
 
 

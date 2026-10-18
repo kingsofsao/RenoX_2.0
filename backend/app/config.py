@@ -44,6 +44,9 @@ class ApiSettings:
     auth_attempts_per_window: int = 20        # sign-in/sign-up attempts per IP per 15 minutes
     uploads_per_hour: int = 60                # files per account per hour
     investigations_per_hour: int = 30         # investigations started per account per hour
+    contact_per_hour: int = 5                 # contact-form messages per IP per hour
+    admin_emails: frozenset[str] = frozenset()  # accounts that may see site statistics and contact messages
+    origin_secret: str = ""                   # set: only requests from the front proxy (x-origin-secret) are served
 
     @property
     def max_upload_bytes(self) -> int:
@@ -81,4 +84,7 @@ def get_api_settings() -> ApiSettings:
         auth_attempts_per_window=max(3, _int("AUTH_ATTEMPTS_PER_WINDOW", 20)),
         uploads_per_hour=max(1, _int("UPLOADS_PER_HOUR", 60)),
         investigations_per_hour=max(1, _int("INVESTIGATIONS_PER_HOUR", 30)),
+        contact_per_hour=max(1, _int("CONTACT_PER_HOUR", 5)),
+        admin_emails=frozenset(e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()),
+        origin_secret=os.getenv("ORIGIN_SECRET", "").strip(),
     )

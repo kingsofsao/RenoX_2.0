@@ -1,12 +1,28 @@
-# Production stack: web (nginx + React) -> backend (FastAPI) -> FalkorDB.
-# Only the web container is published; the API and the database are reachable on the internal
-# network only. Put a TLS terminator (Caddy, a cloud load balancer, or nginx + certbot) in front of
-# port 8080 and set ALLOWED_ORIGINS to your https:// site origin.
+# Production stack: Caddy (HTTPS) -> web (nginx + React) -> backend (FastAPI) -> FalkorDB.
+# Only Caddy is published (ports 80 and 443). The web server, the API and the database are reachable
+# on the internal network only.
 #
+#   cp .env.example .env                        # DOMAIN, ACME_EMAIL, FALKORDB_PASSWORD, operator details
 #   cp backend/.env.example backend/.env        # then edit it (see the README "Deployment" section)
-#   export FALKORDB_PASSWORD=$(openssl rand -hex 32)
 #   docker compose up -d --build
 services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [web]
+    networks: [internal]
+
   falkordb:
     image: falkordb/falkordb:latest
     restart: unless-stopped
@@ -23,6 +39,7 @@ services:
     env_file: ./backend/.env
     environment:
       ENVIRONMENT: production
+      ALLOWED_ORIGINS: https://${DOMAIN}
       FALKORDB_URL: falkor://default:${FALKORDB_PASSWORD}@falkordb:6379
       RESEARCHMIND_DATA_DIR: /data
     volumes:
@@ -35,16 +52,21 @@ services:
     cap_drop: [ALL]
 
   web:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_SITE_URL: https://${DOMAIN}
+        VITE_OPERATOR_NAME: ${OPERATOR_NAME:-}
+        VITE_CONTACT_EMAIL: ${CONTACT_EMAIL:-}
     restart: unless-stopped
-    ports:
-      - "8080:8080"
     depends_on: [backend]
     networks: [internal]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
 
 volumes:
+  caddy-data:
+  caddy-config:
   falkordb-data:
   app-data:
 

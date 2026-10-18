@@ -118,6 +118,29 @@ export interface User {
   theme: ThemeSetting
   language: string
   created_at: string
+  is_admin: boolean
+}
+
+// ---- Site (backend/app/routes/site.py) ----
+
+export type MetricEvent = 'page_view' | 'signup' | 'upload' | 'investigation'
+
+export interface AdminAnalytics {
+  days: number
+  totals: Record<MetricEvent, number>
+  series: ({ day: string } & Record<MetricEvent, number>)[]
+  top_paths: { path: string; views: number }[]
+  campaigns: ({ campaign: string } & Record<MetricEvent, number>)[]
+}
+
+export interface ContactMessage {
+  id: string
+  created_at: string
+  name: string
+  email: string
+  topic: string
+  message: string
+  user_id: string
 }
 
 export interface SessionInfo {

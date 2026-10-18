@@ -1,5 +1,7 @@
 """Security middleware for every request.
 
+0. Front proxy: with ORIGIN_SECRET set (the API sits behind Vercel), any request without the matching
+   `x-origin-secret` header bypassed the proxy and is answered 404 (the liveness probe excepted).
 1. Rate limit: requests per client IP per minute across /api (429 with Retry-After).
 2. CSRF: state-changing requests (POST/PUT/PATCH/DELETE) must
    - not come from another site (Sec-Fetch-Site / Origin checked against ALLOWED_ORIGINS), and
@@ -29,6 +31,7 @@ API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-act
 # The original PDF is shown by the browser's own viewer, which a deny-all policy would break.
 PDF_CSP = "default-src 'none'; object-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
 DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
+LIVE_PATH = "/api/health/live"  # the platform's health check calls the API directly, not via the proxy
 
 
 def _error(status: int, code: str, message: str, headers: dict | None = None) -> JSONResponse:
@@ -55,7 +58,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         is_api = path.startswith("/api/")
 
-        if is_api and path != "/api/health/live":
+        if settings.origin_secret and path != LIVE_PATH and not same(request.headers.get("x-origin-secret"),
+                                                                     settings.origin_secret):
+            return self._secure(_error(404, "not_found", "Not found."), path, settings)
+
+        if is_api and path != LIVE_PATH:
             try:
                 get_limiters().api.hit(client_ip(request))
             except RateLimited as e:

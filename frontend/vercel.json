@@ -1,0 +1,57 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm ci --no-audit --no-fund",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "https://researchmind-api.onrender.com/api/$1",
+      "transforms": [
+        {
+          "type": "request.headers",
+          "op": "set",
+          "target": { "key": "x-origin-secret" },
+          "args": "$ORIGIN_SECRET",
+          "env": ["ORIGIN_SECRET"]
+        }
+      ]
+    },
+    {
+      "src": "/(.*)",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
+        "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cache-Control": "no-cache"
+      },
+      "continue": true
+    },
+    {
+      "src": "/assets/(.*)",
+      "headers": { "Cache-Control": "public, max-age=31536000, immutable" },
+      "continue": true
+    },
+    {
+      "src": "/(images/.+\\.webp|og-image\\.png|favicon\\.(ico|svg)|apple-touch-icon\\.png|icon-[a-z0-9-]+\\.png)",
+      "headers": { "Cache-Control": "public, max-age=604800" },
+      "continue": true
+    },
+    {
+      "src": "/site\\.webmanifest",
+      "headers": { "Content-Type": "application/manifest+json" },
+      "continue": true
+    },
+    { "src": "/.*\\.(map|bak|orig|swp)", "status": 404, "dest": "/index.html" },
+    { "src": "/\\..*", "status": 404, "dest": "/index.html" },
+    { "handle": "filesystem" },
+    { "src": "/(signin|signup|privacy|terms|investigate|library|upload|projects|settings|admin|graph)/?", "dest": "/index.html" },
+    { "src": "/papers/[A-Za-z0-9_-]+/?", "dest": "/index.html" },
+    { "src": "/.*", "status": 404, "dest": "/index.html" }
+  ]
+}

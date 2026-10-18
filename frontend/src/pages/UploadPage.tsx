@@ -6,9 +6,11 @@ import { UploadDropzone } from '../components/UploadDropzone'
 import { Alert, Button, ButtonLink, Card, CardHeader, PageHeader, ProgressBar, StatusBadge, cx } from '../components/ui'
 import { useHealth } from '../hooks/HealthContext'
 import { useProjects } from '../hooks/ProjectContext'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useI18n } from '../i18n/I18nProvider'
 import type { MessageKey } from '../i18n/en'
 import { api } from '../services/api'
+import { track } from '../services/analytics'
 import { errorText } from '../services/errors'
 import { formatBytes } from '../services/format'
 import type { UploadResult } from '../types/api'
@@ -49,6 +51,7 @@ function resultMessage(t: (k: MessageKey, v?: Record<string, string | number>) =
 
 export function UploadPage() {
   const { t, tn } = useI18n()
+  usePageMeta(t('upload.title'), undefined, { noindex: true })
   const { health } = useHealth()
   const { refresh: refreshProjects } = useProjects()
   const maxMb = health?.config.max_upload_mb ?? DEFAULT_MAX_MB
@@ -89,6 +92,7 @@ export function UploadPage() {
         )
         const result = res.results[0]
         update(item.key, { state: 'done', progress: 100, result, message: resultMessage(t, result) })
+        if (result.status === 'processed') track('upload')
       } catch (err) {
         update(item.key, { state: 'error', message: errorText(t, err) })
       }

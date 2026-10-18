@@ -26,13 +26,13 @@ export function PaperPicker({ papers, selected, onSelect, disabled }: {
   if (current && !expanded) {
     return (
       <div className="flex items-center gap-3 rounded-xl border border-brand/30 bg-brand-soft/60 px-4 py-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand text-white"><FileText className="h-4 w-4" /></span>
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-solid text-white"><FileText className="h-4 w-4" /></span>
         <div className="min-w-0 flex-1">
           <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-brand-fg">{t('picker.analysing')}</p>
           <p className="truncate font-medium text-fg">{current.display_title}</p>
         </div>
         <button type="button" disabled={disabled} onClick={() => setExpanded(true)}
-          className="shrink-0 rounded-md px-2.5 py-1.5 text-sm font-medium text-brand transition-colors hover:bg-brand-soft disabled:opacity-50">
+          className="shrink-0 rounded-md px-2.5 py-1.5 text-sm font-medium text-brand-fg transition-colors hover:bg-brand-soft disabled:opacity-50">
           {t('picker.change')}
         </button>
       </div>
@@ -60,7 +60,7 @@ export function PaperPicker({ papers, selected, onSelect, disabled }: {
                 className={cx('flex w-full items-start gap-3 rounded-lg px-3 py-2 text-start transition-all duration-150 active:scale-[0.99]',
                   active ? 'bg-surface ring-2 ring-brand' : 'hover:bg-surface')}>
                 <span className={cx('mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors',
-                  active ? 'border-brand bg-brand text-white' : 'border-line-strong')}>
+                  active ? 'border-brand-solid bg-brand-solid text-white' : 'border-line-strong')}>
                   {active && <Check className="h-3 w-3" />}
                 </span>
                 <span className="min-w-0 flex-1">

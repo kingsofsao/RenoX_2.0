@@ -10,15 +10,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from researchmind.accounts import BaseAccounts, LoginThrottle, User, new_user
 from researchmind.projects import BaseRegistry
 
-from ..auth import (clear_session_cookie, current_session_id, get_accounts, get_current_user, set_csrf_cookie,
-                    start_session)
+from ..auth import (clear_session_cookie, current_session_id, get_accounts, get_current_user, get_optional_user,
+                    set_csrf_cookie, start_session, user_out)
 from ..config import get_api_settings
 from ..database import forget_project, get_registry
 from ..ratelimit import client_ip, get_limiters
-from ..schemas.auth import (AccountDelete, PasswordChange, ProfileUpdate, SessionList, SignInRequest, SignUpRequest,
-                            UserOut)
-from ..security import (PasswordRejected, check_password, clean_name, hash_password, needs_rehash, normalize_email,
-                        verify_password)
+from ..schemas.auth import (AccountDelete, PasswordChange, ProfileUpdate, SessionList, SessionState, SignInRequest,
+                            SignUpRequest, UserOut)
+from ..security import (PasswordRejected, check_form_challenge, check_password, clean_name, hash_password, needs_rehash,
+                        normalize_email, verify_password)
 from ..services.investigation_service import InvestigationManager, get_manager
 
 log = logging.getLogger("researchmind.api.auth")
@@ -44,6 +44,8 @@ def sign_up(body: SignUpRequest, request: Request, response: Response,
     _limit_auth(request)
     if not get_api_settings().allow_signup:
         raise HTTPException(403, "New accounts cannot be created on this server.")
+    if body.website or not check_form_challenge(body.challenge):  # bot: honeypot filled, or no/too-fast challenge
+        raise HTTPException(400, "The form expired or was sent too quickly. Please try again.")
     try:
         email = normalize_email(body.email)
     except ValueError as e:
@@ -61,7 +63,7 @@ def sign_up(body: SignUpRequest, request: Request, response: Response,
     registry.ensure_workspace(user.id)
     start_session(accounts, user, request, response, remember=True)
     log.info("Account created: %s", user.id)  # ids only; emails and passwords are never logged
-    return user.public()
+    return user_out(user)
 
 
 @router.post("/login", response_model=UserOut)
@@ -93,7 +95,7 @@ def sign_in(body: SignInRequest, request: Request, response: Response,
     registry.ensure_workspace(user.id)
     start_session(accounts, user, request, response, remember=body.remember)
     accounts.purge_expired(time.time())
-    return user.public()
+    return user_out(user)
 
 
 @router.post("/logout", status_code=204)
@@ -105,9 +107,15 @@ def sign_out(request: Request, response: Response, accounts: BaseAccounts = Depe
     set_csrf_cookie(response)
 
 
+@router.get("/session", response_model=SessionState)
+def session_state(user: User | None = Depends(get_optional_user)) -> dict:
+    """The app's start-up check: 200 for visitors too, so a signed-out page load logs no error."""
+    return {"user": user_out(user) if user else None}
+
+
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)) -> dict:
-    return user.public()
+    return user_out(user)
 
 
 @router.patch("/me", response_model=UserOut)
@@ -124,7 +132,7 @@ def update_me(body: ProfileUpdate, user: User = Depends(get_current_user),
         user.theme = body.theme
     user.updated_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     accounts.save_user(user)
-    return user.public()
+    return user_out(user)
 
 
 @router.post("/password", status_code=204)

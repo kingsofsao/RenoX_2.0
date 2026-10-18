@@ -13,7 +13,7 @@ interface AuthState {
   /** Set when the account could not be loaded for a reason other than "not signed in". */
   bootError: string | null
   signIn: (email: string, password: string, remember: boolean) => Promise<User>
-  signUp: (body: { email: string; password: string; name: string }) => Promise<User>
+  signUp: (body: { email: string; password: string; name: string; challenge: string; website: string }) => Promise<User>
   signOut: () => Promise<void>
   updateProfile: (patch: { name?: string }) => Promise<User>
   /** Change language/theme: applied at once, and saved to the account when signed in. */
@@ -46,8 +46,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStatus('loading')
     setBootError(null)
     api.csrf().catch(() => undefined)
-      .then(() => api.me())
-      .then((u) => { if (!cancelled) adopt(u) })
+      .then(() => api.session())
+      .then(({ user: u }) => {
+        if (cancelled) return
+        if (u) adopt(u)
+        else { setUser(null); setStatus('signed-out') }
+      })
       .catch((err) => {
         if (cancelled) return
         const e = toApiError(err)

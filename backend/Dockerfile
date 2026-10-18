@@ -13,15 +13,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN useradd --create-home --uid 10001 app && mkdir -p /data /models && chown app:app /data /models
 WORKDIR /app
 
+# EMBEDDINGS=light leaves out SentenceTransformers (PyTorch, several GB) for small instances such as
+# Render's free plan (512 MB); run it with EMBEDDING_BACKEND=hashing (the built-in offline embedder).
+ARG EMBEDDINGS=full
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt
+RUN pip install --upgrade pip && \
+    if [ "$EMBEDDINGS" = "light" ]; then grep -v '^sentence-transformers' requirements.txt > /tmp/req.txt; \
+    else cp requirements.txt /tmp/req.txt; fi && \
+    pip install -r /tmp/req.txt && rm /tmp/req.txt
 
 COPY app ./app
 COPY researchmind ./researchmind
 
 USER app
 # Download the embedding model at build time, so containers start without network access.
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+RUN if [ "$EMBEDDINGS" != "light" ]; then \
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"; fi
 ENV HF_HUB_OFFLINE=1
 
 EXPOSE 8000

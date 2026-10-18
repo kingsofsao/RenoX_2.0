@@ -43,7 +43,7 @@ export function UploadDropzone({ onFiles, disabled, maxMb }: { onFiles: (files: 
           : dragging ? 'scale-[1.01] cursor-copy border-brand bg-brand-soft' : 'cursor-pointer border-line-strong bg-surface hover:border-brand/60 hover:bg-surface-2',
       )}
     >
-      <div className={cx('mb-4 rounded-2xl p-3.5 transition-all duration-200', dragging ? 'scale-110 bg-brand text-white' : 'bg-brand-soft text-brand group-hover:-translate-y-0.5')}>
+      <div className={cx('mb-4 rounded-2xl p-3.5 transition-all duration-200', dragging ? 'scale-110 bg-brand-solid text-white' : 'bg-brand-soft text-brand group-hover:-translate-y-0.5')}>
         <UploadCloud className="h-7 w-7" />
       </div>
       <p className="font-medium text-fg">{dragging ? t('upload.drop.release') : t('upload.drop.title')}</p>

@@ -1,6 +1,8 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import type {
+  AdminAnalytics,
   ApiErrorBody,
+  ContactMessage,
   GraphOverview,
   GraphStats,
   HealthResponse,
@@ -110,9 +112,11 @@ export const api = {
   // ---- account ----
   csrf: () => call(() => http.get<void>('/api/auth/csrf')),
   me: () => call(() => http.get<User>('/api/auth/me')),
+  /** The signed-in user, or null for a visitor (never a 401). */
+  session: () => call(() => http.get<{ user: User | null }>('/api/auth/session')),
   signIn: (email: string, password: string, remember: boolean) =>
     call(() => http.post<User>('/api/auth/login', { email, password, remember })),
-  signUp: (body: { email: string; password: string; name: string; language: string; theme: ThemeSetting }) =>
+  signUp: (body: { email: string; password: string; name: string; language: string; theme: ThemeSetting; challenge: string; website: string }) =>
     call(() => http.post<User>('/api/auth/signup', body)),
   signOut: () => call(() => http.post<void>('/api/auth/logout')),
   updateProfile: (body: { name?: string; language?: string; theme?: ThemeSetting }) =>
@@ -122,6 +126,15 @@ export const api = {
   listSessions: () => call(() => http.get<{ sessions: SessionInfo[] }>('/api/auth/sessions')),
   signOutOtherSessions: () => call(() => http.delete<void>('/api/auth/sessions')),
   deleteAccount: (password: string) => call(() => http.delete<void>('/api/auth/me', { data: { password } })),
+
+  // ---- public site ----
+  formChallenge: () => call(() => http.get<{ challenge: string }>('/api/forms/challenge')),
+  contact: (body: { name: string; email: string; topic: string; message: string; challenge: string; website: string }) =>
+    call(() => http.post<{ status: string }>('/api/contact', body)),
+  analyticsEvent: (body: { name: string; path: string; utm_source?: string; utm_medium?: string; utm_campaign?: string }) =>
+    call(() => http.post<void>('/api/analytics/event', body)),
+  adminAnalytics: (days = 30) => call(() => http.get<AdminAnalytics>('/api/admin/analytics', { params: { days } })),
+  adminMessages: () => call(() => http.get<{ messages: ContactMessage[] }>('/api/admin/messages')),
 
   // ---- service ----
   health: () => call(() => http.get<HealthResponse>('/api/health', { timeout: 20_000 })),

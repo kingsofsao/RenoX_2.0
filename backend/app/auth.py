@@ -77,6 +77,37 @@ def current_session_id(request: Request) -> str | None:
     return token_hash(token) if token and len(token) <= 128 else None
 
 
+def get_site():
+    from .database import get_site_store
+    return get_site_store()
+
+
+def is_admin(user: User) -> bool:
+    return user.email_lower in get_api_settings().admin_emails
+
+
+def user_out(user: User) -> dict:
+    """The signed-in user as the API returns it (never the password hash or lockout state)."""
+    return {**user.public(), "is_admin": is_admin(user)}
+
+
+def get_optional_user(request: Request, accounts: BaseAccounts = Depends(get_accounts)) -> User | None:
+    """The signed-in user, or None for visitors (public forms work for both)."""
+    try:
+        return get_current_user(request, accounts)
+    except AuthRequired:
+        return None
+
+
+def require_admin(request: Request, accounts: BaseAccounts = Depends(get_accounts)) -> User:
+    """Admins only; everyone else gets the same 404 as for a route that does not exist."""
+    from fastapi import HTTPException
+    user = get_current_user(request, accounts)
+    if not is_admin(user):
+        raise HTTPException(404, "Not Found")
+    return user
+
+
 def get_current_user(request: Request, accounts: BaseAccounts = Depends(get_accounts)) -> User:
     """The signed-in user, or AuthRequired (401)."""
     cached = getattr(request.state, "user", None)

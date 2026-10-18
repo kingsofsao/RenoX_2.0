@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Check, FolderPlus, Lock, Pencil, Trash2, X } from 'lucide-react'
-import { Alert, Badge, Button, Card, CardHeader, Input, PageHeader, cx } from '../components/ui'
+import { ConfirmDialog } from '../components/Modal'
+import { Alert, Badge, Button, Card, CardHeader, Field, Input, PageHeader, cx } from '../components/ui'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useProjects } from '../hooks/ProjectContext'
 import { useI18n } from '../i18n/I18nProvider'
 import { api } from '../services/api'
@@ -44,7 +46,7 @@ function ProjectRow({ p, active, canDelete, onSelect, onChanged }: {
               <p className="flex flex-wrap items-center gap-2 font-medium text-fg">{p.name}{active && <Badge tone="brand">{t('projects.active')}</Badge>}</p>
               {p.description && <p className="mt-0.5 text-sm text-fg-muted">{p.description}</p>}
               <p className="mt-0.5 text-xs text-fg-subtle">
-                {p.paper_count != null ? tn('library.papers', p.paper_count) : '—'} · {tn('projects.investigations', p.investigation_count ?? 0)} · {t('projects.created', { date: formatDate(p.created_at, { dateStyle: 'medium' }) })}
+                {p.paper_count != null ? tn('library.papers', p.paper_count) : '-'} · {tn('projects.investigations', p.investigation_count ?? 0)} · {t('projects.created', { date: formatDate(p.created_at, { dateStyle: 'medium' }) })}
               </p>
             </>
           )}
@@ -57,15 +59,13 @@ function ProjectRow({ p, active, canDelete, onSelect, onChanged }: {
           </div>
         )}
       </div>
-      {deleting && (
-        <div className="mt-3 animate-fade-up rounded-lg border border-bad/25 bg-bad-soft p-3 text-sm text-bad-fg">
-          <p>{t('projects.delete.warning', { name: p.name })}</p>
-          <div className="mt-2 flex gap-2">
-            <Input value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={p.name} aria-label={t('projects.delete.type')} />
-            <Button variant="danger" onClick={() => void remove()} loading={busy} disabled={confirm !== p.name}>{t('projects.delete')}</Button>
-          </div>
-        </div>
-      )}
+      <ConfirmDialog open={deleting} onCancel={() => { setDeleting(false); setConfirm('') }} onConfirm={() => void remove()}
+        title={t('projects.delete')} description={t('projects.delete.warning', { name: p.name })} confirmLabel={t('projects.delete')}
+        busy={busy} disabled={confirm !== p.name}>
+        <Field label={t('projects.delete.type')} htmlFor={`confirm-${p.id}`}>
+          <Input id={`confirm-${p.id}`} value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={p.name} autoComplete="off" data-autofocus />
+        </Field>
+      </ConfirmDialog>
     </li>
   )
 }
@@ -79,6 +79,7 @@ export function ProjectsPage() {
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  usePageMeta(t('projects.title'), undefined, { noindex: true })
 
   const create = async () => {
     setError(null); setBusy(true)
@@ -105,7 +106,7 @@ export function ProjectsPage() {
         <Card>
           <CardHeader title={t('projects.new')} />
           <form className="grid gap-3 p-5 sm:grid-cols-[1fr_2fr_auto]" onSubmit={(e) => { e.preventDefault(); void create() }}>
-            <Input placeholder={t('projects.name')} aria-label={t('projects.name')} value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
+            <Input placeholder={t('projects.name')} aria-label={t('projects.name')} value={name} maxLength={80} required onChange={(e) => setName(e.target.value)} />
             <Input placeholder={t('projects.descriptionField')} aria-label={t('projects.descriptionField')} value={description} maxLength={500} onChange={(e) => setDescription(e.target.value)} />
             <Button type="submit" loading={busy} disabled={!name.trim()}><FolderPlus className="h-4 w-4" /> {t('projects.create')}</Button>
           </form>

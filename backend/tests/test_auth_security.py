@@ -20,6 +20,11 @@ from researchmind.agent import Investigator
 QUESTION = "Do graph attention models generalize to unseen proteins?"
 
 
+def signup(client, body):
+    """POST /api/auth/signup the way the web form does: with a fresh form challenge."""
+    return client.post("/api/auth/signup", json={"challenge": client.get("/api/forms/challenge").json()["challenge"], **body})
+
+
 @pytest.fixture
 def fake_data(memory_registry):
     """Each project gets its own FakeStore; investigations run offline over FakeTools."""
@@ -44,10 +49,14 @@ def test_sign_up_sign_in_sign_out(memory_accounts):
     stored = memory_accounts.get_user(user["id"])
     assert stored.password_hash.startswith("$argon2id$") and PASSWORD not in stored.password_hash
     assert client.get("/api/auth/me").json()["id"] == user["id"]
+    assert client.get("/api/auth/session").json()["user"]["id"] == user["id"]
     assert pid.startswith("prj_")
 
     assert client.post("/api/auth/logout").status_code == 204
     assert client.get("/api/auth/me").status_code == 401
+    # The start-up check answers visitors with 200 and no user, never with account data.
+    r = client.get("/api/auth/session")
+    assert r.status_code == 200 and r.json() == {"user": None}
 
     again = new_client()
     r = again.post("/api/auth/login", json={"email": "ada@example.org", "password": PASSWORD})
@@ -57,7 +66,7 @@ def test_sign_up_sign_in_sign_out(memory_accounts):
 
 def test_cookies_are_http_only_and_same_site():
     c = new_client()
-    r = c.post("/api/auth/signup", json={"email": "a@b.co", "name": "Alan Turing", "password": PASSWORD})
+    r = signup(c, {"email": "a@b.co", "name": "Alan Turing", "password": PASSWORD})
     cookies = r.headers.get_list("set-cookie")
     session = next(h for h in cookies if h.startswith("rm_session="))
     csrf = next(h for h in cookies if h.startswith("rm_csrf="))
@@ -70,20 +79,20 @@ def test_cookies_are_http_only_and_same_site():
     ("password1234", "too common"), ("lovelace-is-great", "email address or name"),
 ])
 def test_password_policy(password, message):
-    r = new_client().post("/api/auth/signup", json={"email": "ada@example.org", "name": "Ada Lovelace", "password": password})
+    r = signup(new_client(), {"email": "ada@example.org", "name": "Ada Lovelace", "password": password})
     assert r.status_code == 422 and message in r.json()["error"]["message"]
     assert password not in r.text or len(password) < 6
 
 
 @pytest.mark.parametrize("email", ["not-an-email", "a@b", "a b@c.de", "x@" + "a" * 300 + ".com"])
 def test_invalid_emails_are_rejected(email):
-    r = new_client().post("/api/auth/signup", json={"email": email, "name": "Ada Lovelace", "password": PASSWORD})
+    r = signup(new_client(), {"email": email, "name": "Ada Lovelace", "password": PASSWORD})
     assert r.status_code == 422
 
 
 def test_duplicate_email_case_insensitive():
     sign_up(email="ada@example.org")
-    r = new_client().post("/api/auth/signup", json={"email": "ADA@example.org", "name": "Other", "password": PASSWORD})
+    r = signup(new_client(), {"email": "ADA@example.org", "name": "Other", "password": PASSWORD})
     assert r.status_code == 409
 
 
@@ -126,7 +135,7 @@ def test_signup_can_be_disabled(monkeypatch):
     from app.routes import auth as auth_routes
     closed = replace(get_api_settings(), allow_signup=False)
     monkeypatch.setattr(auth_routes, "get_api_settings", lambda: closed)
-    r = new_client().post("/api/auth/signup", json={"email": "a@b.co", "name": "Ada Lovelace", "password": PASSWORD})
+    r = signup(new_client(), {"email": "a@b.co", "name": "Ada Lovelace", "password": PASSWORD})
     assert r.status_code == 403
 
 
@@ -300,3 +309,105 @@ def test_investigations_per_hour_limit(fake_data, monkeypatch):
     url = f"/api/projects/{pid}/investigations"
     codes = [client.post(url, json={"question": QUESTION, "paper_id": P1, "wait": True}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+# ---------------------------------------------------------------------- spam protection, contact, analytics
+
+def test_signup_needs_a_valid_form_challenge_and_empty_honeypot():
+    c = new_client()
+    body = {"email": "bot@example.org", "name": "Bot Builder", "password": PASSWORD}
+    assert c.post("/api/auth/signup", json=body).status_code == 400            # no challenge (direct POST)
+    assert c.post("/api/auth/signup", json={**body, "challenge": "1.2.forged"}).status_code == 400
+    assert signup(c, {**body, "website": "http://spam.example"}).status_code == 400  # honeypot filled
+    assert signup(c, body).status_code == 201
+
+
+def test_form_challenge_is_signed_and_time_bound(monkeypatch):
+    from app import security
+    token = security.issue_form_challenge(now=1_000_000)
+    monkeypatch.setattr(security, "FORM_MIN_SECONDS", 3)
+    assert not security.check_form_challenge(token, now=1_000_001)          # too fast
+    assert security.check_form_challenge(token, now=1_000_010)
+    assert not security.check_form_challenge(token, now=1_000_000 + 3 * 3600)  # expired
+    ts, nonce, sig = token.split(".")
+    assert not security.check_form_challenge(f"{int(ts) - 60}.{nonce}.{sig}", now=1_000_010)  # tampered time
+
+
+def test_contact_form(memory_accounts):
+    from app import auth
+    from app.main import app
+    site = app.dependency_overrides[auth.get_site]()
+    c = new_client()
+    ch = c.get("/api/forms/challenge").json()["challenge"]
+    ok = {"name": "Rosalind Franklin", "email": "rf@example.org", "topic": "feedback", "message": "The citations are very useful.",
+          "challenge": ch}
+    assert c.post("/api/contact", json={**ok, "message": "short"}).status_code == 422
+    assert c.post("/api/contact", json={**ok, "email": "nope"}).status_code == 422
+    assert c.post("/api/contact", json={**ok, "challenge": ""}).status_code == 400
+    assert c.post("/api/contact", json=ok).status_code == 202
+    assert c.post("/api/contact", json={**ok, "website": "spam"}).status_code == 202  # silently dropped
+    assert [m.message for m in site.messages] == ["The citations are very useful."]
+
+
+def test_analytics_store_only_aggregates(memory_accounts):
+    from app import auth
+    from app.main import app
+    site = app.dependency_overrides[auth.get_site]()
+    c = new_client()
+    for _ in range(2):
+        assert c.post("/api/analytics/event", json={"name": "page_view", "path": "/papers/p_0123456789ab",
+                                                    "utm_source": "Newsletter"}).status_code == 204
+    assert c.post("/api/analytics/event", json={"name": "page_view", "path": "javascript:alert(1)"}).status_code == 422
+    assert c.post("/api/analytics/event", json={"name": "login_secret", "path": "/"}).status_code == 422
+    assert c.post("/api/analytics/event", json={"name": "page_view", "path": "/", "ip": "1.2.3.4"}).status_code == 422
+    rows = list(site.metrics.values())
+    assert len(rows) == 1 and rows[0]["count"] == 2 and rows[0]["path"] == "/papers/:p" and rows[0]["utm_source"] == "newsletter"
+    assert set(rows[0]) == {"day", "name", "path", "utm_source", "utm_medium", "utm_campaign", "count"}  # nothing personal
+
+
+def test_admin_views_are_hidden_from_non_admins(monkeypatch, memory_accounts):
+    from dataclasses import replace
+    from app import auth as auth_mod
+    from app.config import get_api_settings
+    client, user, _ = sign_up()
+    assert user["is_admin"] is False
+    assert client.get("/api/admin/analytics").status_code == 404
+    assert client.get("/api/admin/messages").status_code == 404
+    assert new_client().get("/api/admin/analytics").status_code == 401
+    admin_settings = replace(get_api_settings(), admin_emails=frozenset({"ada@example.org"}))
+    monkeypatch.setattr(auth_mod, "get_api_settings", lambda: admin_settings)
+    assert client.get("/api/auth/me").json()["is_admin"] is True
+    stats = client.get("/api/admin/analytics?days=7").json()
+    assert len(stats["series"]) == 7 and set(stats["totals"]) == {"page_view", "signup", "upload", "investigation"}
+    assert client.get("/api/admin/messages").json() == {"messages": []}
+
+
+# ---------------------------------------------------------------------- front proxy (Vercel)
+
+@pytest.fixture
+def behind_proxy(monkeypatch):
+    """ORIGIN_SECRET set: the API only answers requests that carry it (Vercel adds it on every rewrite)."""
+    from dataclasses import replace
+    from app import middleware, ratelimit
+    from app.config import get_api_settings
+    proxied = replace(get_api_settings(), origin_secret="front-proxy-secret")
+    monkeypatch.setattr(middleware, "get_api_settings", lambda: proxied)
+    monkeypatch.setattr(ratelimit, "get_api_settings", lambda: proxied)
+    return {"x-origin-secret": "front-proxy-secret"}
+
+
+def test_requests_that_bypass_the_proxy_are_refused(behind_proxy):
+    c = Client(app)
+    assert c.get("/api/auth/me").status_code == 404
+    assert c.get("/api/auth/me", headers={"x-origin-secret": "guess"}).status_code == 404
+    assert c.get("/api/auth/me", headers=behind_proxy).status_code == 401
+    assert c.get("/api/health/live").status_code == 200  # the platform's health check calls the API directly
+
+
+def test_rate_limits_use_the_visitor_address_from_the_proxy(behind_proxy, monkeypatch):
+    from app.ratelimit import SlidingWindow, get_limiters
+    monkeypatch.setattr(get_limiters(), "api", SlidingWindow(3, 60))
+    c = Client(app)
+    one, two = {**behind_proxy, "x-real-ip": "203.0.113.1"}, {**behind_proxy, "x-real-ip": "203.0.113.2"}
+    assert [c.get("/api/auth/me", headers=one).status_code for _ in range(4)] == [401, 401, 401, 429]
+    assert c.get("/api/auth/me", headers=two).status_code == 401

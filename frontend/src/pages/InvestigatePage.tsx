@@ -5,12 +5,15 @@ import {
   Trash2, Upload, XCircle,
 } from 'lucide-react'
 import { ConfidenceBadge, InvestigationResultView } from '../components/InvestigationResult'
+import { ConfirmDialog } from '../components/Modal'
 import { PaperPicker } from '../components/PaperPicker'
 import { Alert, Badge, Button, ButtonLink, Card, CardHeader, EmptyState, PageHeader, ProgressBar, Textarea, cx } from '../components/ui'
 import { useHealth } from '../hooks/HealthContext'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useI18n } from '../i18n/I18nProvider'
 import type { MessageKey } from '../i18n/en'
 import { ApiError, api, getActiveProject, pollInvestigation, toApiError } from '../services/api'
+import { track } from '../services/analytics'
 import { errorText } from '../services/errors'
 import { buildMarkdownExport, downloadText, reportFilename } from '../services/report'
 import type { Investigation, InvestigationSummary, PaperSummary } from '../types/api'
@@ -99,7 +102,7 @@ function ProgressPanel({ inv, paperTitle }: { inv: Investigation | null; paperTi
               <li key={key} className={cx('flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors duration-300',
                 done ? 'border-ok/30 bg-ok-soft text-ok-fg' : current ? 'border-brand/40 bg-brand-soft text-brand-fg' : 'border-line text-fg-subtle')}>
                 <span className={cx('flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold',
-                  done ? 'bg-ok text-white' : current ? 'bg-brand text-white' : 'bg-surface-3 text-fg-subtle')}>
+                  done ? 'bg-ok text-white' : current ? 'bg-brand-solid text-white' : 'bg-surface-3 text-fg-subtle')}>
                   {done ? <Check className="h-3 w-3" /> : current ? <Loader2 className="h-3 w-3 animate-spin" /> : i + 1}
                 </span>
                 <span className="font-medium">{t(key)}</span>
@@ -150,28 +153,24 @@ function HistoryList({ items, currentId, onOpen, onDelete }: { items: Investigat
                 </span>
               </button>
               {it.status !== 'running' && it.status !== 'queued' && (
-                confirm === it.id ? (
-                  <div className="flex items-center justify-end gap-2 px-5 pb-3">
-                    <Button variant="danger" size="sm" onClick={() => { setConfirm(null); onDelete(it.id) }}>{t('common.delete')}</Button>
-                    <Button variant="ghost" size="sm" onClick={() => setConfirm(null)}>{t('common.cancel')}</Button>
-                  </div>
-                ) : (
-                  <button type="button" onClick={() => setConfirm(it.id)} title={t('history.delete')} aria-label={t('history.delete')}
-                    className="absolute end-3 top-3 rounded p-1.5 text-fg-subtle opacity-0 transition-all hover:bg-bad-soft hover:text-bad-fg focus:opacity-100 group-hover:opacity-100">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                )
+                <button type="button" onClick={() => setConfirm(it.id)} title={t('history.delete')} aria-label={t('history.delete')}
+                  className="absolute end-3 top-3 rounded p-1.5 text-fg-subtle opacity-0 transition-all hover:bg-bad-soft hover:text-bad-fg focus:opacity-100 group-hover:opacity-100">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
               )}
             </li>
           ))}
         </ul>
       )}
+      <ConfirmDialog open={confirm !== null} onCancel={() => setConfirm(null)} onConfirm={() => { if (confirm) onDelete(confirm); setConfirm(null) }}
+        title={t('history.delete.title')} description={t('history.delete.text')} confirmLabel={t('common.delete')} />
     </Card>
   )
 }
 
 export function InvestigatePage() {
   const { t, lang } = useI18n()
+  usePageMeta(t('investigate.title'), undefined, { noindex: true })
   const { health } = useHealth()
   const [searchParams, setSearchParams] = useSearchParams()
   const [question, setQuestion] = useState('')
@@ -254,6 +253,7 @@ export function InvestigatePage() {
       const created = await api.startInvestigation(trimmed, paperId, { requirements: requirements.trim() || undefined, language: lang })
       setInv(created)
       storeId(created.id)
+      track('investigation')
       refreshRecent()
       await follow(created.id)
     } catch (err) {
@@ -344,7 +344,7 @@ export function InvestigatePage() {
                 <div className="flex flex-col gap-3 border-t border-line pt-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex flex-wrap items-center gap-4 text-xs text-fg-subtle">
                     <button type="button" onClick={() => setShowReq((v) => !v)} className="font-medium text-brand hover:text-brand-hover">
-                      {showReq ? t('investigate.requirements.hide') : t('investigate.requirements.add')}{requirements.trim() ? ' ✓' : ''}
+                      {showReq ? t('investigate.requirements.hide') : t('investigate.requirements.add')}{requirements.trim() ? ` (${t('investigate.requirements.added')})` : ''}
                     </button>
                     <span className={cx('tabular-nums', tooShort && 'text-warn-fg')}>
                       {tooShort ? t('investigate.tooShort', { min: MIN_CHARS }) : `${trimmed.length}/${MAX_CHARS}`} · {t('investigate.shortcut')}

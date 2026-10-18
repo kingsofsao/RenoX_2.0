@@ -1,0 +1,59 @@
+# Render Blueprint for the ResearchMind API (the React app is deployed on Vercel, see frontend/vercel.json).
+# Render dashboard -> New -> Blueprint -> pick this repository. Values marked `sync: false` are asked for
+# when the Blueprint is created. The database is FalkorDB Cloud.
+#
+# Free plan: 512 MB, sleeps after 15 minutes without traffic, and the disk is wiped on every restart or
+# deploy: accounts, projects, knowledge graphs and investigations (all in FalkorDB) are kept, uploaded
+# PDFs and their page text are not. For real users use a paid plan with a persistent disk on /data.
+services:
+  - type: web
+    name: researchmind-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health/live
+    buildFilter:
+      paths:
+        - backend/**
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: production
+      # Build arg: no PyTorch, built-in hashing embedder (fits in 512 MB).
+      - key: EMBEDDINGS
+        value: light
+      - key: EMBEDDING_BACKEND
+        value: hashing
+      # Requests must come through Vercel, which adds this header. Copy the generated value into the
+      # Vercel project's ORIGIN_SECRET environment variable.
+      - key: ORIGIN_SECRET
+        generateValue: true
+      # The Vercel site, e.g. https://researchmind.vercel.app (several: comma-separated).
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # From the FalkorDB Cloud console, e.g. falkors://default:PASSWORD@HOST:PORT
+      - key: FALKORDB_URL
+        sync: false
+      - key: FALKORDB_GRAPH
+        value: researchmind
+      - key: STORE_PAGES_IN_GRAPH
+        value: "true"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: LLM_PROVIDER
+        value: anthropic
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-5-5
+      - key: AI_REQUIRED
+        value: "true"
+      - key: USE_LLM_EXTRACTION
+        value: "true"
+      # One investigation at a time keeps memory inside the free plan.
+      - key: INVESTIGATION_MAX_CONCURRENT
+        value: "1"

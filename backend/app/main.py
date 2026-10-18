@@ -28,7 +28,7 @@ from .config import get_api_settings
 from .database import DatabaseUnavailable, reset_store
 from .middleware import SecurityMiddleware
 from .ratelimit import RateLimited
-from .routes import auth, graph, health, investigations, papers, projects
+from .routes import auth, graph, health, investigations, papers, projects, site
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("researchmind.api")
@@ -142,6 +142,7 @@ async def unhandled(_: Request, exc: Exception):
 
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(site.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 # Project-scoped data routes. The project (and so the FalkorDB graph and data folder) comes from the
 # URL and is resolved on the server by database.get_project, only for the project's owner.

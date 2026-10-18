@@ -53,9 +53,9 @@ export function PaperTable({ papers, compact = false }: { papers: PaperSummary[]
             {papers.map((p) => (
               <tr key={p.id} className="transition-colors hover:bg-surface-2">
                 <td className="max-w-md px-5 py-3"><TitleCell paper={p} /></td>
-                <td className="max-w-[14rem] truncate px-3 py-3 text-fg-muted" title={p.filename ?? ''}>{p.filename ?? '—'}</td>
+                <td className="max-w-[14rem] truncate px-3 py-3 text-fg-muted" title={p.filename ?? ''}>{p.filename ?? '-'}</td>
                 <td className="px-3 py-3"><StatusBadge status={p.status} /></td>
-                <td className="px-3 py-3 text-end tabular-nums text-fg-muted">{p.page_count ?? '—'}</td>
+                <td className="px-3 py-3 text-end tabular-nums text-fg-muted">{p.page_count ?? '-'}</td>
                 {!compact && <td className="px-3 py-3 text-end tabular-nums text-fg-muted">{formatBytes(p.file_size)}</td>}
                 {!compact && <td className="whitespace-nowrap px-3 py-3 text-fg-subtle">{formatDate(p.updated_at)}</td>}
                 <td className="px-5 py-3 text-end"><AnalyseLink paper={p} /></td>

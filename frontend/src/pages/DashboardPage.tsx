@@ -8,12 +8,14 @@ import { Alert, Badge, ButtonLink, Card, CardHeader, EmptyState, LoadingBlock, P
 import { useHealth } from '../hooks/HealthContext'
 import { useProjects } from '../hooks/ProjectContext'
 import { useAsync } from '../hooks/useAsync'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useI18n } from '../i18n/I18nProvider'
 import { api } from '../services/api'
 import { errorText } from '../services/errors'
 
 export function DashboardPage() {
   const { t, formatDate } = useI18n()
+  usePageMeta(t('nav.overview'), undefined, { noindex: true })
   const { user } = useAuth()
   const { active } = useProjects()
   const { health } = useHealth()

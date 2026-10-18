@@ -19,6 +19,8 @@ os.environ["RESEARCHMIND_DATA_DIR"] = tempfile.mkdtemp(prefix="researchmind-test
 os.environ["LLM_PROVIDER"] = "none"
 # Most mocked tests exercise the offline plan; tests of the AI-required behaviour switch it on explicitly.
 os.environ["AI_REQUIRED"] = "false"
+# Public forms require a minimum fill time against bots; tests submit immediately.
+os.environ["FORM_MIN_SECONDS"] = "0"
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -82,10 +84,13 @@ def memory_accounts(request):
     from app import auth
     from app.main import app
     from researchmind.accounts import MemoryAccounts
-    accounts = MemoryAccounts()
+    from researchmind.site import MemorySiteStore
+    accounts, site = MemoryAccounts(), MemorySiteStore()
     app.dependency_overrides[auth.get_accounts] = lambda: accounts
+    app.dependency_overrides[auth.get_site] = lambda: site
     yield accounts
     app.dependency_overrides.pop(auth.get_accounts, None)
+    app.dependency_overrides.pop(auth.get_site, None)
 
 
 @pytest.fixture(autouse=True)

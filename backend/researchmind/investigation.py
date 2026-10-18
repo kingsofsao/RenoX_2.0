@@ -272,8 +272,8 @@ def build_structured(result: InvestigationResult, lookup: Lookup | None, corpus_
 
     unverified = [w for w in result.warnings if "does not match any evidence" in w]
     if sources.dropped:
-        result.warnings.append(f"{len(sources.dropped)} evidence reference(s) returned by tools could not be verified "
-                               "in the knowledge graph and were left out.")
+        result.warnings.append(f"{_count(len(sources.dropped), 'evidence reference')} returned by tools could not be verified "
+                               f"in the knowledge graph and {'was' if len(sources.dropped) == 1 else 'were'} left out.")
     confidence = assess_confidence(mode=result.mode, findings=findings, comparisons=comparisons, sources=source_list,
                                    papers=len(papers), corpus_size=corpus_size, unverified=len(unverified),
                                    narrative=section(result.report_markdown, "Confidence"), evidence_found=evidence_found,
@@ -304,6 +304,11 @@ def summarize(markdown: str, findings: list[dict]) -> str:
     return "The ingested papers contain little direct evidence on this question."
 
 
+def _count(n: int, singular: str, plural: str | None = None) -> str:
+    """'1 paper', '3 papers'."""
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 def assess_confidence(*, mode: str, findings: list, comparisons: list, sources: list, papers: int,
                       corpus_size: int | None, unverified: int, narrative: str = "", evidence_found: bool = True,
                       scoped: bool = False) -> dict:
@@ -311,18 +316,19 @@ def assess_confidence(*, mode: str, findings: list, comparisons: list, sources: 
     # Analysing one selected paper is not penalised for lacking a second paper.
     min_papers = 1 if scoped and corpus_size == 1 else 2
     reasons, uncertainties = [], []
-    reasons.append(f"{len(sources)} verified evidence passage(s) from {papers} paper(s)"
+    reasons.append(f"{_count(len(sources), 'verified evidence passage')} from {_count(papers, 'paper')}"
                    + (f" out of {corpus_size} {'selected' if scoped else 'ingested'}" if corpus_size else "") + ".")
     if mode == "offline":
         uncertainties.append("Offline mode: evidence was ranked by similarity and graph structure; no language model reasoned over it.")
     if conflicts:
-        uncertainties.append(f"{conflicts} cross-paper conflict(s) detected; the papers disagree on part of this question.")
+        uncertainties.append(f"{_count(conflicts, 'cross-paper conflict')} detected; the papers disagree on part of this question.")
     if unverified:
-        uncertainties.append(f"{unverified} citation(s) in the narrative did not match stored evidence and are marked [unverified].")
+        uncertainties.append(f"{_count(unverified, 'citation')} in the narrative did not match stored evidence and {'is' if unverified == 1 else 'are'} marked [unverified].")
     if scoped:
-        uncertainties.append(f"Limited to the {corpus_size} selected paper(s); other papers in the library were not consulted.")
+        uncertainties.append(("Limited to the selected paper" if corpus_size == 1 else f"Limited to the {corpus_size} selected papers")
+                             + "; other papers in the library were not consulted.")
     elif corpus_size is not None and corpus_size < 5:
-        uncertainties.append(f"Small corpus ({corpus_size} paper(s)); conclusions and gaps reflect only these papers.")
+        uncertainties.append(f"Small corpus ({_count(corpus_size, 'paper')}); conclusions and gaps reflect only these papers.")
     uncertainties.append("Candidate gaps are hypotheses from the ingested papers, not confirmed novel directions.")
 
     if not evidence_found:

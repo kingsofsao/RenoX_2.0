@@ -5,6 +5,7 @@ import { DatabaseNotice } from '../components/DatabaseNotice'
 import { PaperTable } from '../components/PaperTable'
 import { Alert, Button, ButtonLink, Card, EmptyState, LoadingBlock, PageHeader, cx } from '../components/ui'
 import { useAsync } from '../hooks/useAsync'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useI18n } from '../i18n/I18nProvider'
 import type { MessageKey } from '../i18n/en'
 import { api } from '../services/api'
@@ -20,6 +21,7 @@ const FILTERS: { value: PaperStatus | 'all'; label: MessageKey }[] = [
 
 export function LibraryPage() {
   const { t, tn, formatNumber } = useI18n()
+  usePageMeta(t('library.title'), undefined, { noindex: true })
   const [params, setParams] = useSearchParams()
   const status = (params.get('status') as PaperStatus | null) ?? undefined
   const search = params.get('q') ?? ''

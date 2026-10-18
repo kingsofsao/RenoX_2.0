@@ -1,7 +1,10 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ArrowLeft, ChevronLeft, ChevronRight, ExternalLink, FileText, FlaskConical, Trash2 } from 'lucide-react'
+import { CopyButton } from '../components/CopyButton'
+import { ConfirmDialog } from '../components/Modal'
 import { Alert, Button, ButtonLink, Card, CardHeader, EmptyState, LoadingBlock, StatusBadge, buttonClass, cx } from '../components/ui'
+import { usePageMeta } from '../hooks/usePageMeta'
 import { useProjects } from '../hooks/ProjectContext'
 import { useAsync } from '../hooks/useAsync'
 import { useI18n } from '../i18n/I18nProvider'
@@ -87,6 +90,7 @@ export function PaperDetailPage() {
   const [confirming, setConfirming] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const { data, error, loading } = useAsync(() => api.getPaper(paperId, page, 1), [paperId, page])
+  usePageMeta(data?.paper.display_title ?? t('paper.metadata'), undefined, { noindex: true })
 
   const back = <Link to="/library" className="inline-flex items-center gap-1 text-sm text-fg-muted transition-colors hover:text-fg"><ArrowLeft className="h-4 w-4 rtl:rotate-180" /> {t('paper.back')}</Link>
   if (loading && !data) return <Card><LoadingBlock rows={6} /></Card>
@@ -135,16 +139,9 @@ export function PaperDetailPage() {
           <Button variant="danger" onClick={() => setConfirming(true)} disabled={deleting}><Trash2 className="h-4 w-4" /> {t('common.delete')}</Button>
         </div>
       </div>
-      {confirming && (
-        <Alert tone="error" title={t('paper.delete.title')}
-          action={<div className="flex gap-2">
-            <Button variant="danger" size="sm" loading={deleting} onClick={() => void remove()}>{t('common.delete')}</Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>{t('common.cancel')}</Button>
-          </div>}>
-          {t('paper.delete.text', { title: paper.display_title })}
-        </Alert>
-      )}
-      {deleteError && <Alert tone="error" title={t('paper.delete.failed')}>{deleteError}</Alert>}
+      <ConfirmDialog open={confirming} onCancel={() => { setConfirming(false); setDeleteError(null) }} onConfirm={() => void remove()}
+        title={t('paper.delete.title')} description={t('paper.delete.text', { title: paper.display_title })}
+        confirmLabel={t('common.delete')} busy={deleting} error={deleteError} />
 
       {paper.status === 'failed' && (
         <Alert tone="error" title={t('paper.failed.title')}>
@@ -163,7 +160,7 @@ export function PaperDetailPage() {
               <Meta label={t('paper.filename')}>{paper.filename ?? unknown}</Meta>
               <Meta label={t('paper.col.pages')}>{paper.page_count ?? unknown}</Meta>
               <Meta label={t('paper.col.size')}>{formatBytes(paper.file_size)}</Meta>
-              <Meta label={t('paper.id')}><code className="text-xs">{paper.id}</code></Meta>
+              <Meta label={t('paper.id')}><span className="inline-flex items-center gap-1"><code className="text-xs">{paper.id}</code><CopyButton text={paper.id} compact /></span></Meta>
               <Meta label="SHA-256"><code className="text-xs" title={paper.sha256 ?? ''}>{shortHash(paper.sha256, 20)}</code></Meta>
               <Meta label={t('paper.ingested')}>{formatDate(paper.ingested_at ?? paper.updated_at)}</Meta>
               {Object.entries(paper.pdf_metadata).map(([k, v]) => <Meta key={k} label={`PDF ${k}`}>{v}</Meta>)}
@@ -191,7 +188,8 @@ export function PaperDetailPage() {
           {!data.text_available ? (
             <EmptyState icon={<FileText className="h-6 w-6" />} title={t('paper.text.none')} description={paper.status === 'failed' ? t('paper.text.failed') : t('paper.text.unavailable')} />
           ) : (
-            <div className={cx('max-h-[70vh] overflow-y-auto p-5 transition-opacity', loading && 'opacity-60')}>
+            <div tabIndex={0} role="region" aria-label={t('paper.text')}
+              className={cx('max-h-[70vh] overflow-y-auto p-5 transition-opacity focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-brand', loading && 'opacity-60')}>
               {pages.map((p) => (
                 <article key={p.page}>
                   <p className="mb-2 text-xs font-medium uppercase tracking-wide text-fg-subtle">{t('paper.text.page', { page: p.page, chars: formatNumber(p.chars) })}</p>

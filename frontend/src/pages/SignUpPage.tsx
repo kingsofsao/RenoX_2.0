@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { ArrowRight } from 'lucide-react'
 import { useAuth } from '../auth/AuthProvider'
@@ -7,8 +7,10 @@ import { AuthShell } from '../components/AuthShell'
 import { PasswordInput, PasswordStrength, passwordChecks } from '../components/PasswordField'
 import { Alert, Button, Field, Input } from '../components/ui'
 import { useI18n } from '../i18n/I18nProvider'
-import { toApiError } from '../services/api'
+import { api, toApiError } from '../services/api'
+import { track } from '../services/analytics'
 import { errorText } from '../services/errors'
+import { usePageMeta } from '../hooks/usePageMeta'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -22,6 +24,11 @@ export function SignUpPage() {
   const [touched, setTouched] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [challenge, setChallenge] = useState('')
+  const [website, setWebsite] = useState('')  // honeypot, invisible to people
+  const newChallenge = () => api.formChallenge().then((r) => setChallenge(r.challenge)).catch(() => undefined)
+  useEffect(() => { void newChallenge() }, [])
+  usePageMeta(t('auth.signup.title'), t('meta.signup.description'))
 
   const emailOk = EMAIL.test(email.trim())
   const rulesOk = passwordChecks(password, email, name).every((c) => c.ok)
@@ -36,10 +43,13 @@ export function SignUpPage() {
     setError(null)
     try {
       setPostAuthRedirect('/upload')  // a new account starts by adding its first paper
-      await signUp({ email: email.trim(), password, name: name.trim() })
+      await signUp({ email: email.trim(), password, name: name.trim(), challenge, website })
+      track('signup', '/signup')
     } catch (err) {
       const apiErr = toApiError(err)
-      setError(apiErr.status === 409 ? t('auth.signup.exists') : apiErr.status === 403 ? t('auth.signup.closed') : errorText(t, apiErr))
+      if (apiErr.status === 400) void newChallenge()
+      setError(apiErr.status === 409 ? t('auth.signup.exists') : apiErr.status === 403 ? t('auth.signup.closed')
+        : apiErr.status === 400 ? t('form.expired') : errorText(t, apiErr))
     } finally {
       setBusy(false)
     }
@@ -65,10 +75,17 @@ export function SignUpPage() {
         <Field label={t('auth.password.confirm')} htmlFor="confirm" error={touched && confirm && !matches ? t('auth.password.mismatch') : null}>
           <PasswordInput id="confirm" value={confirm} onChange={setConfirm} autoComplete="new-password" invalid={touched && !matches} />
         </Field>
+        {/* Honeypot: hidden from people and assistive technology; bots that fill it are refused. */}
+        <div aria-hidden className="absolute -start-[10000px] h-px w-px overflow-hidden">
+          <label htmlFor="website">Website</label>
+          <input id="website" tabIndex={-1} autoComplete="off" value={website} onChange={(e) => setWebsite(e.target.value)} />
+        </div>
         <Button type="submit" size="lg" className="w-full" loading={busy}>
           {t('auth.signup.submit')} {!busy && <ArrowRight className="h-4 w-4 rtl:rotate-180" />}
         </Button>
-        <p className="text-center text-xs leading-relaxed text-fg-subtle">{t('auth.signup.privacy')}</p>
+        <p className="text-center text-xs leading-relaxed text-fg-subtle">
+          {t('auth.signup.agree.before')} <Link to="/terms" className="font-medium text-brand hover:underline">{t('legal.terms')}</Link> {t('auth.signup.agree.and')} <Link to="/privacy" className="font-medium text-brand hover:underline">{t('legal.privacy')}</Link>{t('auth.signup.agree.after')}
+        </p>
       </form>
     </AuthShell>
   )

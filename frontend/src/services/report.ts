@@ -70,7 +70,7 @@ export function buildMarkdownExport(inv: Investigation, t: T = englishT): string
   out.push('', `> ${t('export.disclaimer')}`, '')
 
   if (!r) {
-    out.push(`## ${t('export.error')}`, '', inv.error?.message ?? '—', '')
+    out.push(`## ${t('export.error')}`, '', inv.error?.message ?? '-', '')
     return out.join('\n')
   }
 
@@ -80,7 +80,7 @@ export function buildMarkdownExport(inv: Investigation, t: T = englishT): string
   out.push(`## ${t('result.findings')}`, '')
   if (!r.findings.length) out.push(`_${t('result.findings.none')}_`)
   for (const f of r.findings) {
-    out.push(`- **${f.type === 'claim' ? t('result.claim') : t('result.finding')}** — ${oneLine(f.text)}${f.page ? ` (${t('result.page', { page: f.page })})` : ''}${cites(f.citations)}`)
+    out.push(`- **${f.type === 'claim' ? t('result.claim') : t('result.finding')}**: ${oneLine(f.text)}${f.page ? ` (${t('result.page', { page: f.page })})` : ''}${cites(f.citations)}`)
   }
   out.push('')
 
@@ -94,7 +94,7 @@ export function buildMarkdownExport(inv: Investigation, t: T = englishT): string
   if (!r.gaps.length) out.push(`_${t('result.gaps.none')}_`, '')
   for (const g of r.gaps) {
     out.push(`### ${g.id}. ${oneLine(g.title)}`, '', `- ${g.rationale}${cites(g.citations)}`)
-    for (const e of g.evidence) out.push(`- [${e.citation}] ${e.page ? `${t('result.page', { page: e.page })} — ` : ''}"${oneLine(e.quote)}"`)
+    for (const e of g.evidence) out.push(`- [${e.citation}] ${e.page ? `${t('result.page', { page: e.page })}: ` : ''}"${oneLine(e.quote)}"`)
     out.push('')
   }
 
@@ -115,7 +115,7 @@ export function buildMarkdownExport(inv: Investigation, t: T = englishT): string
 
   out.push(`## ${t('result.confidence')}`, '', `**${t('result.confidence')}: ${t(`confidence.${r.confidence.level}`)}**`, '')
   for (const x of r.confidence.reasons) out.push(`- ${x}`)
-  for (const x of r.confidence.uncertainties) out.push(`- ⚠ ${x}`)
+  for (const x of r.confidence.uncertainties) out.push(`- ${x}`)
   if (r.confidence.narrative) out.push('', `${t('result.assessment')}: ${r.confidence.narrative}`)
   out.push('')
 
@@ -130,7 +130,7 @@ export function buildMarkdownExport(inv: Investigation, t: T = englishT): string
 
   out.push(`## ${t('export.sources')}`, '')
   for (const s of r.sources) {
-    out.push(`${s.n}. *${s.paper_title ?? s.paper_id}*${s.year ? ` (${s.year})` : ''}${s.page ? `, ${t('result.page', { page: s.page })}` : ''}${s.section ? `, ${s.section}` : ''} — "${oneLine(s.quote)}" \`${s.chunk_id}\``)
+    out.push(`${s.n}. *${s.paper_title ?? s.paper_id}*${s.year ? ` (${s.year})` : ''}${s.page ? `, ${t('result.page', { page: s.page })}` : ''}${s.section ? `, ${s.section}` : ''}: "${oneLine(s.quote)}" \`${s.chunk_id}\``)
   }
   out.push('')
 

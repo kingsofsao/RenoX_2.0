@@ -16,7 +16,7 @@ const dot: Record<Level, string> = {
 function Row({ label, level, value }: { label: string; level: Level; value: string }) {
   return (
     <div className="flex items-center justify-between gap-2 text-xs">
-      <span className="text-white/45">{label}</span>
+      <span className="text-white/60">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5 text-white/80">
         <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', dot[level])} />
         <span className="truncate">{value}</span>
@@ -45,8 +45,8 @@ export function HealthIndicator() {
   return (
     <div className="space-y-2 rounded-xl border border-sidebar-line bg-sidebar-2 p-3">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-white/40">{t('health.title')}</span>
-        <button onClick={refresh} className="rounded p-1 text-white/40 transition-colors hover:bg-white/10 hover:text-white" title={t('health.recheck')} aria-label={t('health.recheck')}>
+        <span className="text-[11px] font-medium uppercase tracking-[0.12em] text-white/60">{t('health.title')}</span>
+        <button onClick={refresh} className="rounded p-1 text-white/60 transition-colors hover:bg-white/10 hover:text-white" title={t('health.recheck')} aria-label={t('health.recheck')}>
           <RefreshCw className="h-3.5 w-3.5" />
         </button>
       </div>

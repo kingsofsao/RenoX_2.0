@@ -25,7 +25,7 @@ export function StatCard({
         <div className="min-w-0">
           <p className="truncate text-sm text-fg-muted">{label}</p>
           <p className="mt-1.5 text-3xl font-semibold tracking-tight tabular-nums text-fg">
-            {loading ? <span className="skeleton inline-block h-8 w-14 align-middle" /> : value == null ? '—' : formatNumber(value)}
+            {loading ? <span className="skeleton inline-block h-8 w-14 align-middle" /> : value == null ? '-' : formatNumber(value)}
           </p>
         </div>
         <div className={cx('rounded-xl p-2.5 transition-transform duration-200 group-hover:scale-110', tones[tone])}>{icon}</div>

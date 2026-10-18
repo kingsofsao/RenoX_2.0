@@ -75,7 +75,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       return t(`${key}_${form}` as MessageKey, { count: num.format(count), ...vars })
     }
     const formatDate = (iso: string | null | undefined, opts: Intl.DateTimeFormatOptions = { dateStyle: 'medium', timeStyle: 'short' }) => {
-      if (!iso) return '—'
+      if (!iso) return '-'
       const d = new Date(iso)
       return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(lang, opts)
     }

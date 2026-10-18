@@ -30,7 +30,8 @@ def sign_up(client: Client | None = None, email: str = "ada@example.org", name: 
             password: str = PASSWORD, **extra) -> tuple[Client, dict, str]:
     """Create an account and return (signed-in client, user, id of the user's first project)."""
     client = client or new_client()
-    r = client.post("/api/auth/signup", json={"email": email, "name": name, "password": password, **extra})
+    challenge = client.get("/api/forms/challenge").json()["challenge"]
+    r = client.post("/api/auth/signup", json={"email": email, "name": name, "password": password, "challenge": challenge, **extra})
     assert r.status_code == 201, r.text
     projects = client.get("/api/projects").json()["projects"]
     return client, r.json(), projects[0]["id"]

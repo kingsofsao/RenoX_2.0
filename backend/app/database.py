@@ -23,6 +23,7 @@ from researchmind.accounts import BaseAccounts, FalkorAccounts, User
 from researchmind.config import get_settings
 from researchmind.graph import GraphConnectionError, GraphStore
 from researchmind.projects import FalkorRegistry, Project
+from researchmind.site import BaseSiteStore, FalkorSiteStore
 
 from .auth import get_current_user
 
@@ -40,6 +41,7 @@ class DatabaseUnavailable(Exception):
 _db: FalkorDB | None = None
 _registry: FalkorRegistry | None = None
 _accounts: FalkorAccounts | None = None
+_site: FalkorSiteStore | None = None
 _stores: dict[str, GraphStore] = {}
 _lock = threading.RLock()
 
@@ -99,6 +101,22 @@ def get_account_store() -> BaseAccounts:
         return _accounts
 
 
+def get_site_store() -> BaseSiteStore:
+    """Contact messages and aggregate usage counters (stored in the registry graph)."""
+    global _site
+    if _site is not None:
+        return _site
+    with _lock:
+        if _site is None:
+            try:
+                _site = FalkorSiteStore(_client(), get_registry().graph_name)
+            except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+                log.warning("Site store unavailable: %s", e.__class__.__name__)
+                reset_store()
+                raise DatabaseUnavailable("unavailable") from e
+        return _site
+
+
 def get_principal(user: User = Depends(get_current_user)) -> str:
     """The acting user's id. Every project, graph and investigation lookup is checked against it."""
     return user.id
@@ -140,11 +158,12 @@ def forget_project(project_id: str) -> None:
 
 def reset_store() -> None:
     """Drop cached connections so the next request reconnects (after a connection error)."""
-    global _db, _registry, _accounts
+    global _db, _registry, _accounts, _site
     with _lock:
         _stores.clear()
         _registry = None
         _accounts = None
+        _site = None
         if _db is not None:
             try:
                 _db.close()
