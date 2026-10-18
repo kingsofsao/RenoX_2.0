@@ -7,7 +7,7 @@
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "https://researchmind-api-85nm.onrender.com/api/$1",
+      "dest": "https://researchmind-api-afwm.onrender.com/api/$1",
       "transforms": [
         {
           "type": "request.headers",
