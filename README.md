@@ -256,7 +256,8 @@ Render, so the browser still talks to one origin (first-party cookies, no CORS).
 404, and takes the visitor's address for rate limits from Vercel's `x-real-ip`. Uploads that take longer than Vercel's
 120-second proxy limit are answered as a stream that keeps the connection open.
 
-1. **Database.** Create a FalkorDB Cloud instance and copy its connection URL (`falkors://default:PASSWORD@HOST:PORT`).
+1. **Database.** Create a FalkorDB Cloud instance close to the Render region in `render.yaml` (Singapore) and build its
+   connection URL from the console: `falkor://USERNAME:PASSWORD@HOST:PORT` (`falkors://` only if TLS is enabled).
 2. **API on Render.** Push the repository to GitHub. Render dashboard -> **New -> Blueprint** -> pick the repository
    (`render.yaml`). Fill in `ALLOWED_ORIGINS` (your Vercel address, e.g. `https://researchmind.vercel.app`),
    `FALKORDB_URL`, `ADMIN_EMAILS` and `ANTHROPIC_API_KEY`. Note the service address (e.g.

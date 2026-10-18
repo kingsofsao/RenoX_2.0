@@ -10,6 +10,8 @@ services:
     name: researchmind-api
     runtime: docker
     plan: free
+    # Closest Render region to the FalkorDB Cloud instance (AWS ap-south-1, Mumbai). Cannot be changed later.
+    region: singapore
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /api/health/live
@@ -33,7 +35,7 @@ services:
       # The Vercel site, e.g. https://researchmind.vercel.app (several: comma-separated).
       - key: ALLOWED_ORIGINS
         sync: false
-      # From the FalkorDB Cloud console, e.g. falkors://default:PASSWORD@HOST:PORT
+      # From the FalkorDB Cloud console: falkor://USERNAME:PASSWORD@HOST:PORT (falkors:// only if TLS is on)
       - key: FALKORDB_URL
         sync: false
       - key: FALKORDB_GRAPH
