@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 from urllib.parse import urlsplit
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -24,6 +25,8 @@ from .auth import csrf_cookie_name, set_csrf_cookie
 from .config import get_api_settings
 from .ratelimit import RateLimited, client_ip, get_limiters
 from .security import same
+
+log = logging.getLogger("researchmind.api.security")
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 MAX_JSON_BODY = 256 * 1024  # every non-upload request body is small JSON
@@ -45,11 +48,19 @@ def _origin_allowed(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin or origin == "null":
         return origin is None  # non-browser clients send no Origin; "null" (sandboxed/opaque) is refused
-    origin = origin.rstrip("/")
-    if origin in get_api_settings().allowed_origins:
+    settings = get_api_settings()
+    origin = origin.rstrip("/").lower()
+    if origin in settings.allowed_origins:
         return True
-    host = request.headers.get("host", "")
-    return urlsplit(origin).netloc == host
+    hosts = {request.headers.get("host", "").lower()}
+    if settings.origin_secret:
+        # Behind Vercel (the secret was checked already) Host is the API's own address; the address the
+        # visitor used is in x-forwarded-host, which Vercel sets itself.
+        hosts.add(request.headers.get("x-forwarded-host", "").lower())
+    if urlsplit(origin).netloc in hosts - {""}:
+        return True
+    log.warning("Refused cross-site request from origin %s (ALLOWED_ORIGINS: %s)", origin, settings.allowed_origins)
+    return False
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):

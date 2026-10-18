@@ -411,3 +411,14 @@ def test_rate_limits_use_the_visitor_address_from_the_proxy(behind_proxy, monkey
     one, two = {**behind_proxy, "x-real-ip": "203.0.113.1"}, {**behind_proxy, "x-real-ip": "203.0.113.2"}
     assert [c.get("/api/auth/me", headers=one).status_code for _ in range(4)] == [401, 401, 401, 429]
     assert c.get("/api/auth/me", headers=two).status_code == 401
+
+
+def test_same_site_requests_through_the_proxy_are_accepted(behind_proxy):
+    """Host is the API's own address behind Vercel; the visitor's address comes in x-forwarded-host."""
+    c = Client(app)
+    c.get("/api/auth/csrf", headers=behind_proxy)
+    site = {**behind_proxy, "x-forwarded-host": "researchmind.vercel.app", "sec-fetch-site": "same-origin"}
+    ok = c.post("/api/auth/logout", headers={**site, "origin": "https://researchmind.vercel.app"})
+    assert ok.status_code == 204
+    other = c.post("/api/auth/logout", headers={**site, "origin": "https://attacker.example"})
+    assert other.status_code == 403 and other.json()["error"]["code"] == "cross_site_request"

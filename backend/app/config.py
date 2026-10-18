@@ -65,7 +65,8 @@ def get_api_settings() -> ApiSettings:
     environment = "production" if environment in {"prod", "production"} else "development"
     production = environment == "production"
     return ApiSettings(
-        allowed_origins=[o.strip().rstrip("/") for o in origins.split(",") if o.strip()],
+        # Tolerate quotes, spaces, capitals and a trailing slash pasted into the dashboard.
+        allowed_origins=[o.strip().strip("\"'").strip().rstrip("/").lower() for o in origins.split(",") if o.strip()],
         max_upload_mb=_int("MAX_UPLOAD_MB", 25),
         max_files_per_upload=_int("MAX_FILES_PER_UPLOAD", 10),
         upload_dir=Path(os.getenv("UPLOAD_DIR", core.data_dir / "uploads")),
