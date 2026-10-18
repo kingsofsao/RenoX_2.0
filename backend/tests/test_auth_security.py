@@ -228,6 +228,15 @@ def test_allowed_origin_is_accepted():
     assert client.post("/api/projects", json={"name": "Y"}, headers={"Origin": "http://localhost:5173"}).status_code == 201
 
 
+def test_browser_same_origin_requests_are_accepted_behind_a_proxy():
+    """Behind a proxy Host is the API's own address; the browser's Sec-Fetch-Site still says same-origin."""
+    client, _, _ = sign_up()
+    page = {"Origin": "https://researchmind.vercel.app", "Sec-Fetch-Site": "same-origin"}
+    assert client.post("/api/projects", json={"name": "Z"}, headers=page).status_code == 201
+    sibling = {"Origin": "https://evil.example", "Sec-Fetch-Site": "same-site"}
+    assert client.post("/api/projects", json={"name": "Z"}, headers=sibling).status_code == 403
+
+
 # ---------------------------------------------------------------------- tenant isolation
 
 def test_everything_requires_sign_in(fake_data):

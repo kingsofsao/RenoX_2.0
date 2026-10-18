@@ -45,6 +45,10 @@ def _origin_allowed(request: Request) -> bool:
     site = request.headers.get("sec-fetch-site")
     if site and site not in ("same-origin", "same-site", "none"):
         return False
+    if site == "same-origin":
+        # Set by the browser and not forgeable by page scripts: the request comes from this site's own pages,
+        # whatever address a proxy in front of the API puts in Host. (The CSRF token is still required.)
+        return True
     origin = request.headers.get("origin")
     if not origin or origin == "null":
         return origin is None  # non-browser clients send no Origin; "null" (sandboxed/opaque) is refused
