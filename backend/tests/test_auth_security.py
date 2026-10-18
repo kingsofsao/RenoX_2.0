@@ -423,10 +423,11 @@ def test_rate_limits_use_the_visitor_address_from_the_proxy(behind_proxy, monkey
 
 
 def test_same_site_requests_through_the_proxy_are_accepted(behind_proxy):
-    """Host is the API's own address behind Vercel; the visitor's address comes in x-forwarded-host."""
+    """Host is the API's own address behind Vercel; for browsers without Sec-Fetch-Site the visitor's
+    address comes from x-forwarded-host."""
     c = Client(app)
     c.get("/api/auth/csrf", headers=behind_proxy)
-    site = {**behind_proxy, "x-forwarded-host": "researchmind.vercel.app", "sec-fetch-site": "same-origin"}
+    site = {**behind_proxy, "x-forwarded-host": "researchmind.vercel.app"}
     ok = c.post("/api/auth/logout", headers={**site, "origin": "https://researchmind.vercel.app"})
     assert ok.status_code == 204
     other = c.post("/api/auth/logout", headers={**site, "origin": "https://attacker.example"})
