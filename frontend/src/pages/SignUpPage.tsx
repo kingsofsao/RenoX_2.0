@@ -48,7 +48,8 @@ export function SignUpPage() {
     } catch (err) {
       const apiErr = toApiError(err)
       if (apiErr.status === 400) void newChallenge()
-      setError(apiErr.status === 409 ? t('auth.signup.exists') : apiErr.status === 403 ? t('auth.signup.closed')
+      // 403 from the route means sign-ups are switched off; the security middleware's 403s carry their own codes.
+      setError(apiErr.status === 409 ? t('auth.signup.exists') : apiErr.status === 403 && apiErr.code === 'http_error' ? t('auth.signup.closed')
         : apiErr.status === 400 ? t('form.expired') : errorText(t, apiErr))
     } finally {
       setBusy(false)
